@@ -18,3 +18,9 @@ Modify ```COUNTRY = "JPN"``` with alpha-3 country codes at ```main.py``` to acce
 Always update ```/requirements.txt``` and ```/dockerfile``` and build the app before sending PRs.
 
 TODO (@Ujan) : Add naming and contributions conventions for ```/helpers```
+
+**File naming conventions -**
+
+- In the folder ```/helpers``` all the helpers related to data downloading has the name ```data_XXX.py```
+
+- In the folder ```/visual_analysis``` all the helpers related to data downloading has the name ```analysis_XXX.py```

@@ -6,7 +6,7 @@ import shutil
 import pandas as pd
 import time
 
-def get_country_population_density(country:str):
+def get_country_population_density(country:str) -> pd.DataFrame:
         
     if os.path.exists(f"data/population_density/{country}_population_2020.csv"):
         print(f"Population density data for {country} already exists. Skipping download.")

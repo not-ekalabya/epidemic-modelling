@@ -6,7 +6,14 @@ import pandas as pd
 
 import webbrowser
 import os
-from helpers.data_population_density import get_country_population_density
+
+import sys
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent / "helpers"))
+
+from data_population_density import get_country_population_density # ignore warning - intellisense issue
 
 # constants
 
