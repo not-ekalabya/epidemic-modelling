@@ -10,7 +10,7 @@
 
 To view the visual map open the the plotly port running on localhost (usually ```http://127.0.0.1:44193/```)
 
-Modify ```COUNTRY = "JPN"``` at ```main.py``` to access population densities of different countries.
+Modify ```COUNTRY = "JPN"``` with alpha-3 country codes at ```main.py``` to access population densities of different countries.
 
 
 ### Conventions
