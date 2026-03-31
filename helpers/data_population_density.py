@@ -72,9 +72,26 @@ def get_country_population_density(country:str):
 
     population_density_df = pd.read_csv(f"data/population_density/{country}_population_2020.csv", header=None, names=["longitude", "latitude", "population_density"])
 
-    return population_density_df
+    population_density_df = pd.read_csv(
+        f"data/population_density/{country}_population_2020.csv",
+        header=None,
+        names=["longitude", "latitude", "population_density"],
+        low_memory=False
+    )
 
-# test data loading
+    # convert to numeric
+    population_density_df["longitude"] = pd.to_numeric(population_density_df["longitude"], errors="coerce")
+    population_density_df["latitude"] = pd.to_numeric(population_density_df["latitude"], errors="coerce")
+    population_density_df["population_density"] = pd.to_numeric(
+        population_density_df["population_density"], errors="coerce"
+    )
+    
+    # drop invalid rows
+    population_density_df = population_density_df.dropna()
+    
+    return population_density_df
+    
+    # test data loading
 
 if __name__ == "__main__":
     country = "JPN"
