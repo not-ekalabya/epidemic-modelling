@@ -153,3 +153,10 @@ def get_covid_data(country: str) -> pd.DataFrame:
     )
 
     return df
+
+if __name__ == "__main__":
+    
+    COUNTRY_ISO2 = "JPN"
+
+    df_covid = get_covid_data(COUNTRY_ISO2)
+    print(df_covid.head())
