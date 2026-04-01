@@ -5,3 +5,6 @@ folium
 tqdm
 geopandas
 matplotlib
+fastapi
+uvicorn
+pydantic

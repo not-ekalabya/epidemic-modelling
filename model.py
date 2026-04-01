@@ -314,6 +314,39 @@ class SpatioTemporalCovidRLModel:
 
         return model_prefix
 
+    @classmethod
+    def load(cls, model_prefix: str) -> "SpatioTemporalCovidRLModel":
+        metadata_path = f"{model_prefix}.json"
+        weights_path = f"{model_prefix}.npz"
+
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(f"Model metadata not found: {metadata_path}")
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Model weights not found: {weights_path}")
+
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
+        model = cls(
+            history_weeks=int(metadata["history_weeks"]),
+            forecast_weeks=int(metadata["forecast_weeks"]),
+            radius=float(metadata["radius"]),
+            learning_rate=float(metadata["learning_rate"]),
+            noise_scale=float(metadata["noise_scale"]),
+            epochs=int(metadata["epochs"]),
+            random_seed=int(metadata["random_seed"]),
+            show_progress=False,
+        )
+
+        weights = np.load(weights_path)
+        model.weights = weights["weights"]
+        model.bias = weights["bias"]
+        model.feature_mean_ = weights["feature_mean"]
+        model.feature_std_ = weights["feature_std"]
+        model.training_history_ = metadata.get("training_history", [])
+
+        return model
+
     def country_progression_report(
         self,
         df: pd.DataFrame,
