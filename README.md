@@ -25,3 +25,11 @@ TODO (@Ujan) : Add naming and contributions conventions for ```/helpers```
 - In the folder ```/helpers``` all the helpers related to data downloading has the name ```data_XXX.py```
 
 - In the folder ```/visual_analysis``` all the helpers related to data downloading has the name ```analysis_XXX.py```
+
+### Data Notes
+
+- ```helpers/data_covid.py``` downloads and caches Google COVID-19 Open Data epidemiology and geography datasets.
+
+- ```helpers/data_mobility.py``` downloads and caches Google COVID-19 Open Data mobility datasets.
+
+- Country-specific location lookups are cached under ```data/covid/location_lookup/``` so location keys are processed once and reused for faster joins.

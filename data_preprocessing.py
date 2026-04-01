@@ -7,6 +7,7 @@ import webbrowser
 from branca.colormap import LinearColormap
 
 from helpers.data_covid import get_covid_data
+from helpers.data_mobility import get_mobility_data, MOBILITY_COLUMNS
 from helpers.data_population_density import get_country_population_density
 
 
@@ -21,6 +22,9 @@ def get_spatiotemporal_covid_dataset(
 
     print("Loading covid data...")
     covid_df = get_covid_data(country_iso2)
+
+    print("Loading mobility data...")
+    mobility_df = get_mobility_data(country_iso2)
 
     grid_size = grid_km / 111.0   # km → degrees
 
@@ -46,6 +50,27 @@ def get_spatiotemporal_covid_dataset(
     # Prepare temporal dataset
     # --------------------------------
 
+    mobility_df = mobility_df.copy()
+
+    mobility_df["grid_lat"] = (
+        np.floor(mobility_df["latitude"] / grid_size) * grid_size
+    )
+
+    mobility_df["grid_lon"] = (
+        np.floor(mobility_df["longitude"] / grid_size) * grid_size
+    )
+
+    mobility_grid = mobility_df.groupby(
+        ["date", "grid_lat", "grid_lon"]
+    ).agg(
+        **{
+            column: (column, "mean")
+            for column in MOBILITY_COLUMNS
+        }
+    ).reset_index()
+
+    covid_df = covid_df.copy()
+
     covid_df["grid_lat"] = (
         np.floor(covid_df["latitude"] / grid_size) * grid_size
     )
@@ -65,7 +90,7 @@ def get_spatiotemporal_covid_dataset(
         new_recovered=("new_recovered", "sum")
     ).reset_index()
 
-    print("Merging population and covid grids...")
+    print("Merging population, mobility, and covid grids...")
 
     final_df = covid_grid.merge(
         pop_grid,
@@ -73,9 +98,18 @@ def get_spatiotemporal_covid_dataset(
         how="left"
     )
 
+    final_df = final_df.merge(
+        mobility_grid,
+        on=["date", "grid_lat", "grid_lon"],
+        how="left"
+    )
+
     final_df["population_density"] = final_df[
         "population_density"
     ].fillna(0)
+
+    for column in MOBILITY_COLUMNS:
+        final_df[column] = final_df[column].fillna(0.0)
 
 
     return final_df

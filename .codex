@@ -1,0 +1,30 @@
+Adding a new data source in this repository:
+
+1. Follow the naming convention in `README.md`.
+Create a dedicated helper in `helpers/data_<source>.py`.
+Do not add a second logical dataset to an existing helper just because the upstream provider is the same.
+
+2. Keep download and cache logic inside the source helper.
+Store raw source files and processed caches under the matching `data/` family.
+Reuse `helpers/data_covid.py:get_country_location_lookup()` when a source uses Google COVID location keys.
+
+3. Keep helper outputs source-specific.
+`helpers/data_covid.py` returns COVID case rows.
+`helpers/data_mobility.py` returns mobility rows.
+Do not return mixed COVID + mobility rows from one helper.
+
+4. Process each source independently in `data_preprocessing.py`.
+Match the `population_density` workflow:
+load the source, compute `grid_lat` and `grid_lon`, aggregate into a source-specific grid dataframe, then merge that dataframe into the final dataset.
+
+5. Use aggregation that matches the metric semantics.
+Use `sum` for additive quantities such as cases.
+Use `sum` for gridded population density in this repository because the current workflow treats it as a cell total.
+Use `mean` for mobility indicators unless a different domain rule is required.
+
+6. Update downstream consumers explicitly.
+If a new metric is used by training, validation, or visualization, add the required columns and aggregation rules in those modules.
+
+7. Update docs with every new source.
+Add a short source note to `README.md`.
+Add workflow guidance here in `.codex` if the repository procedure changes.

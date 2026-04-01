@@ -11,6 +11,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from data_preprocessing import get_spatiotemporal_covid_dataset
+from helpers.data_mobility import MOBILITY_COLUMNS
 
 
 @dataclass
@@ -344,6 +345,7 @@ class SpatioTemporalCovidRLModel:
             "new_deceased",
             "new_recovered",
             "population_density",
+            *MOBILITY_COLUMNS,
         }
         missing = required_columns - set(df.columns)
         if missing:
@@ -360,6 +362,10 @@ class SpatioTemporalCovidRLModel:
                 new_deceased=("new_deceased", "sum"),
                 new_recovered=("new_recovered", "sum"),
                 population_density=("population_density", "max"),
+                **{
+                    column: (column, "mean")
+                    for column in MOBILITY_COLUMNS
+                },
             )
             .sort_values(["grid_lat", "grid_lon", "week"])
         )
@@ -453,7 +459,16 @@ class SpatioTemporalCovidRLModel:
     ) -> np.ndarray:
         cell_df = weekly_df[
             (weekly_df["grid_lat"] == cell_lat) & (weekly_df["grid_lon"] == cell_lon)
-        ][["week", "new_confirmed", "new_deceased", "new_recovered", "cumulative_confirmed"]]
+        ][
+            [
+                "week",
+                "new_confirmed",
+                "new_deceased",
+                "new_recovered",
+                "cumulative_confirmed",
+                *MOBILITY_COLUMNS,
+            ]
+        ]
 
         cell_df = cell_df.set_index("week").reindex(weeks, fill_value=0.0)
         return cell_df.to_numpy(dtype=float).reshape(-1)
@@ -484,6 +499,10 @@ class SpatioTemporalCovidRLModel:
                 cumulative_confirmed_sum=("cumulative_confirmed", "sum"),
                 new_deceased_sum=("new_deceased", "sum"),
                 new_recovered_sum=("new_recovered", "sum"),
+                **{
+                    f"{column}_mean": (column, "mean")
+                    for column in MOBILITY_COLUMNS
+                },
             )
             .reindex(weeks, fill_value=0.0)
         )
