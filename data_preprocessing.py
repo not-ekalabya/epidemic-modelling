@@ -87,8 +87,8 @@ def visualize_generated_cells(
     metric: str = "population_density",
     date: str | None = None,
     output_path: str = "tmp/spatiotemporal_covid_cells.html",
-    max_cells: int = 5000,
-    open_in_browser: bool = False
+    max_cells: int = np.inf,
+    open_in_browser: bool = True
 ) -> str:
 
     if metric not in df.columns:
@@ -212,7 +212,7 @@ if __name__ == "__main__":
     COUNTRY_ISO2 = "BD"
     COUNTRY_ISO3 = "BGD"
     GRID_KM = 20
-    METRIC = "new_confirmed"
+    METRIC = "population_density"
 
     dataset = get_spatiotemporal_covid_dataset(
         country_iso2=COUNTRY_ISO2,

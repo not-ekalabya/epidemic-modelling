@@ -2,3 +2,5 @@ data/
 venv/
 tmp/
 __pycache__/
+models/
+figures/

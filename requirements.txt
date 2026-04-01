@@ -4,3 +4,4 @@ numpy
 folium
 tqdm
 geopandas
+matplotlib
