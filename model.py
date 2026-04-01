@@ -181,10 +181,22 @@ class SpatioTemporalCovidRLModel:
 
         weekly_df = self._prepare_weekly_dataframe(df)
         prediction_date = pd.to_datetime(prediction_date).to_period("W").start_time
+        cell_df = weekly_df[
+            (weekly_df["grid_lat"] == cell_lat)
+            & (weekly_df["grid_lon"] == cell_lon)
+        ].sort_values("week").reset_index(drop=True)
+        cell_history_df = self._cell_history_frame(cell_df)
+        neighborhood_df = self._neighborhood_frame(weekly_df, cell_lat, cell_lon)
+        neighborhood_history_df = self._neighborhood_history_frame(neighborhood_df)
+        demographic_features = self._demographic_summary(
+            neighborhood_df,
+            cell_lat,
+            cell_lon,
+        )
         state_vector = self._build_single_state(
-            weekly_df=weekly_df,
-            cell_lat=cell_lat,
-            cell_lon=cell_lon,
+            cell_history_df=cell_history_df,
+            neighborhood_history_df=neighborhood_history_df,
+            demographic_features=demographic_features,
             reference_week=prediction_date,
         )
         x = self._normalize_states(state_vector[None, :])
@@ -387,17 +399,48 @@ class SpatioTemporalCovidRLModel:
         targets: list[np.ndarray] = []
         metadata_rows: list[dict[str, object]] = []
 
-        for (cell_lat, cell_lon), cell_df in weekly_df.groupby(["grid_lat", "grid_lon"]):
-            cell_df = cell_df.sort_values("week").reset_index(drop=True)
+        cell_groups = list(weekly_df.groupby(["grid_lat", "grid_lon"], sort=False))
+        cell_frames = {
+            (float(cell_lat), float(cell_lon)): cell_df.sort_values("week").reset_index(drop=True)
+            for (cell_lat, cell_lon), cell_df in cell_groups
+        }
+        neighborhood_map = self._neighborhood_coordinate_map(
+            list(cell_frames.keys())
+        )
+
+        group_iterator = list(cell_frames.items())
+        if self.show_progress:
+            group_iterator = tqdm(
+                group_iterator,
+                total=len(cell_frames),
+                desc="Building episodes",
+            )
+
+        for (cell_lat, cell_lon), cell_df in group_iterator:
             if len(cell_df) < self.history_weeks + self.forecast_weeks:
                 continue
+
+            cell_history_df = self._cell_history_frame(cell_df)
+            neighborhood_df = pd.concat(
+                [
+                    cell_frames[neighbor_coordinate]
+                    for neighbor_coordinate in neighborhood_map[(cell_lat, cell_lon)]
+                ],
+                ignore_index=True,
+            )
+            neighborhood_history_df = self._neighborhood_history_frame(neighborhood_df)
+            demographic_features = self._demographic_summary(
+                neighborhood_df,
+                cell_lat,
+                cell_lon,
+            )
 
             for idx in range(self.history_weeks, len(cell_df) - self.forecast_weeks + 1):
                 reference_week = cell_df.loc[idx - 1, "week"]
                 state = self._build_single_state(
-                    weekly_df=weekly_df,
-                    cell_lat=cell_lat,
-                    cell_lon=cell_lon,
+                    cell_history_df=cell_history_df,
+                    neighborhood_history_df=neighborhood_history_df,
+                    demographic_features=demographic_features,
                     reference_week=reference_week,
                 )
                 future = (
@@ -429,9 +472,9 @@ class SpatioTemporalCovidRLModel:
 
     def _build_single_state(
         self,
-        weekly_df: pd.DataFrame,
-        cell_lat: float,
-        cell_lon: float,
+        cell_history_df: pd.DataFrame,
+        neighborhood_history_df: pd.DataFrame,
+        demographic_features: np.ndarray,
         reference_week: pd.Timestamp,
     ) -> np.ndarray:
         weeks = pd.date_range(
@@ -441,25 +484,18 @@ class SpatioTemporalCovidRLModel:
         )
         weeks = pd.to_datetime(weeks).normalize()
 
-        cell_history = self._cell_history(weekly_df, cell_lat, cell_lon, weeks)
-        neighborhood_df = self._neighborhood_frame(weekly_df, cell_lat, cell_lon)
-        neighborhood_history = self._neighborhood_history(neighborhood_df, weeks)
-        demographic_features = self._demographic_summary(neighborhood_df, cell_lat, cell_lon)
+        cell_history = self._cell_history(cell_history_df, weeks)
+        neighborhood_history = self._neighborhood_history(
+            neighborhood_history_df,
+            weeks,
+        )
 
         return np.concatenate(
             [cell_history, neighborhood_history, demographic_features]
         ).astype(float)
 
-    def _cell_history(
-        self,
-        weekly_df: pd.DataFrame,
-        cell_lat: float,
-        cell_lon: float,
-        weeks: pd.DatetimeIndex,
-    ) -> np.ndarray:
-        cell_df = weekly_df[
-            (weekly_df["grid_lat"] == cell_lat) & (weekly_df["grid_lon"] == cell_lon)
-        ][
+    def _cell_history_frame(self, cell_df: pd.DataFrame) -> pd.DataFrame:
+        return cell_df[
             [
                 "week",
                 "new_confirmed",
@@ -468,10 +504,18 @@ class SpatioTemporalCovidRLModel:
                 "cumulative_confirmed",
                 *MOBILITY_COLUMNS,
             ]
-        ]
+        ].set_index("week")
 
-        cell_df = cell_df.set_index("week").reindex(weeks, fill_value=0.0)
-        return cell_df.to_numpy(dtype=float).reshape(-1)
+    def _cell_history(
+        self,
+        cell_history_df: pd.DataFrame,
+        weeks: pd.DatetimeIndex,
+    ) -> np.ndarray:
+        return (
+            cell_history_df.reindex(weeks, fill_value=0.0)
+            .to_numpy(dtype=float)
+            .reshape(-1)
+        )
 
     def _neighborhood_frame(
         self,
@@ -486,12 +530,35 @@ class SpatioTemporalCovidRLModel:
         radius_in_degrees = self.radius * float(self.grid_spacing_ or 1.0)
         return weekly_df[distances <= radius_in_degrees].copy()
 
-    def _neighborhood_history(
+    def _neighborhood_coordinate_map(
+        self,
+        cell_coordinates: list[tuple[float, float]],
+    ) -> dict[tuple[float, float], list[tuple[float, float]]]:
+        if not cell_coordinates:
+            return {}
+
+        coordinates = np.asarray(cell_coordinates, dtype=float)
+        radius_in_degrees = self.radius * float(self.grid_spacing_ or 1.0)
+        mapping: dict[tuple[float, float], list[tuple[float, float]]] = {}
+
+        for idx, (cell_lat, cell_lon) in enumerate(coordinates):
+            distances = np.sqrt(
+                (coordinates[:, 0] - cell_lat) ** 2
+                + (coordinates[:, 1] - cell_lon) ** 2
+            )
+            neighbor_indices = np.flatnonzero(distances <= radius_in_degrees)
+            mapping[cell_coordinates[idx]] = [
+                cell_coordinates[neighbor_index]
+                for neighbor_index in neighbor_indices
+            ]
+
+        return mapping
+
+    def _neighborhood_history_frame(
         self,
         neighborhood_df: pd.DataFrame,
-        weeks: pd.DatetimeIndex,
-    ) -> np.ndarray:
-        history = (
+    ) -> pd.DataFrame:
+        return (
             neighborhood_df.groupby("week", as_index=True)
             .agg(
                 new_confirmed_sum=("new_confirmed", "sum"),
@@ -504,9 +571,18 @@ class SpatioTemporalCovidRLModel:
                     for column in MOBILITY_COLUMNS
                 },
             )
-            .reindex(weeks, fill_value=0.0)
         )
-        return history.to_numpy(dtype=float).reshape(-1)
+
+    def _neighborhood_history(
+        self,
+        neighborhood_history_df: pd.DataFrame,
+        weeks: pd.DatetimeIndex,
+    ) -> np.ndarray:
+        return (
+            neighborhood_history_df.reindex(weeks, fill_value=0.0)
+            .to_numpy(dtype=float)
+            .reshape(-1)
+        )
 
     def _demographic_summary(
         self,
@@ -678,7 +754,11 @@ def visualize_prediction_progress(
 
 if __name__ == "__main__":
     COUNTRY_CONFIGS = [
-        {"country_iso2": "BD", "country_iso3": "BGD", "grid_km": 20},
+        {"country_iso2": "BD", "country_iso3": "BGD", "grid_km": 20}, # Bangladesh
+        {"country_iso2": "ID", "country_iso3": "IDN", "grid_km": 20}, # Indonesia
+        {"country_iso2": "PH", "country_iso3": "PHL", "grid_km": 20}, # Philippines
+        {"country_iso2": "TH", "country_iso3": "THA", "grid_km": 20}, # Thailand
+        {"country_iso2": "VN", "country_iso3": "VNM", "grid_km": 20}, # Vietnam
     ]
     HISTORY_WEEKS = 12
     FORECAST_WEEKS = 4

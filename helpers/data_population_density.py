@@ -70,8 +70,6 @@ def get_country_population_density(country:str) -> pd.DataFrame:
 
     # load pandas dataframe
 
-    population_density_df = pd.read_csv(f"data/population_density/{country}_population_2020.csv", header=None, names=["longitude", "latitude", "population_density"])
-
     population_density_df = pd.read_csv(
         f"data/population_density/{country}_population_2020.csv",
         header=None,
