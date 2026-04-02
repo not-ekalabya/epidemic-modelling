@@ -1,10 +1,10 @@
-# 🦠 Epidemic Progression Modelling: CodeCure
+#  Epidemic Progression Modelling: CodeCure
 
 A machine learning–driven system for modeling and analyzing epidemic spread using spatiotemporal data, mobility patterns, and demographic features.
 
 ---
 
-## 🚀 Getting Started
+##  Getting Started
 
 ### 1. Install Dependencies
 
@@ -28,7 +28,7 @@ http://127.0.0.1:8000
 
 ---
 
-## 🧠 Model Training
+## Model Training
 
 ### Step 1: Data Preprocessing
 
@@ -41,6 +41,8 @@ python preprocessing.py
 ```bash
 python model.py
 ```
+
+## Model Training
 
 The model is trained using a structured spatio-temporal dataset, and a cache file is generated during preprocessing to eliminate redundant data loading and significantly improve computational efficiency in subsequent runs. This caching mechanism ensures that once the dataset has been transformed into the required grid-based temporal format, it can be reused without repeating expensive preprocessing steps such as aggregation, normalization, and feature construction.
 
