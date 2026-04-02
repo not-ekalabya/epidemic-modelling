@@ -264,18 +264,34 @@ def predict(request: PredictionRequest) -> dict[str, Any]:
         country_report = model.country_progression_report(
             df=dataset,
             reference_week=request.prediction_date,
+            require_nonzero_actuals=request.include_actual,
+            fallback_to_latest_nonzero_actual=request.include_actual,
         )
+        per_cell_progression = country_report.get("per_cell_progression", [])
+        if not request.include_actual:
+            per_cell_progression = [
+                {
+                    "grid_lat": cell["grid_lat"],
+                    "grid_lon": cell["grid_lon"],
+                    "predicted_next_confirmed": cell["predicted_next_confirmed"],
+                    "predicted_trajectory": cell["predicted_trajectory"],
+                }
+                for cell in per_cell_progression
+            ]
+
         response: dict[str, Any] = {
             "prediction": {
+                "requested_reference_week": country_report.get("requested_reference_week"),
                 "reference_week": country_report["reference_week"],
                 "predicted_next_confirmed": float(country_report["predicted_trajectory"][0]),
                 "predicted_trajectory": country_report["predicted_trajectory"],
                 "cell_count": country_report["cell_count"],
+                "per_cell_progression": per_cell_progression,
             }
         }
         if request.include_actual:
             response["actual"] = state.country_actual_trajectory(
-                prediction_date=request.prediction_date,
+                prediction_date=str(country_report["reference_week"]),
                 forecast_weeks=model.forecast_weeks,
             )
         return response

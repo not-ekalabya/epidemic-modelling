@@ -2,12 +2,22 @@
 
 import { FormEvent, useEffect, useState } from "react";
 
+type CellProgression = {
+  grid_lat: number;
+  grid_lon: number;
+  predicted_next_confirmed: number;
+  predicted_trajectory: number[];
+  actual_trajectory?: number[];
+};
+
 type PredictionResponse = {
   prediction: {
+    requested_reference_week?: string;
     reference_week: string;
     predicted_next_confirmed: number;
     predicted_trajectory: number[];
     cell_count: number;
+    per_cell_progression?: CellProgression[];
   };
   actual?: {
     reference_week: string;
@@ -36,6 +46,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PredictionResponse | null>(null);
   const [metadata, setMetadata] = useState<MetadataResponse | null>(null);
+  const [showAllCells, setShowAllCells] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -89,6 +100,7 @@ export default function Home() {
       }
 
       setResult(payload);
+      setShowAllCells(false);
     } catch {
       setResult(null);
       setError("Could not reach the prediction server.");
@@ -164,6 +176,12 @@ export default function Home() {
               <table className="w-full border-collapse text-sm">
                 <tbody>
                   <TableRow
+                    label="Requested month"
+                    value={formatDateValue(
+                      result.prediction.requested_reference_week ?? result.prediction.reference_week,
+                    )}
+                  />
+                  <TableRow
                     label="Reference month"
                     value={formatDateValue(result.prediction.reference_week)}
                   />
@@ -183,6 +201,12 @@ export default function Home() {
           <TrajectoryTable
             title="Predicted trajectory"
             values={result.prediction.predicted_trajectory}
+          />
+
+          <CellProgressionTable
+            rows={result.prediction.per_cell_progression ?? []}
+            showAll={showAllCells}
+            onToggleShowAll={() => setShowAllCells((current) => !current)}
           />
 
           {result.actual ? (
@@ -244,4 +268,69 @@ function TrajectoryTable({
       </div>
     </div>
   );
+}
+
+function CellProgressionTable({
+  rows,
+  showAll,
+  onToggleShowAll,
+}: {
+  rows: CellProgression[];
+  showAll: boolean;
+  onToggleShowAll: () => void;
+}) {
+  if (!rows.length) {
+    return null;
+  }
+
+  const maxRows = 100;
+  const visibleRows = showAll ? rows : rows.slice(0, maxRows);
+
+  return (
+    <div>
+      <div className="flex items-end justify-between gap-3">
+        <h2 className="text-lg font-semibold">Per-cell progression</h2>
+        {rows.length > maxRows ? (
+          <button
+            className="rounded border px-3 py-1 text-sm"
+            onClick={onToggleShowAll}
+            type="button"
+          >
+            {showAll ? "Show top 100" : `Show all ${rows.length}`}
+          </button>
+        ) : null}
+      </div>
+
+      <div className="mt-3 overflow-auto rounded border">
+        <table className="w-full border-collapse text-sm">
+          <thead className="bg-neutral-50">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">Cell (lat, lon)</th>
+              <th className="px-3 py-2 text-left font-medium">Predicted next</th>
+              <th className="px-3 py-2 text-left font-medium">Predicted trajectory</th>
+              <th className="px-3 py-2 text-left font-medium">Actual trajectory</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleRows.map((row, index) => (
+              <tr className="border-t" key={`${row.grid_lat}-${row.grid_lon}-${index}`}>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {row.grid_lat.toFixed(4)}, {row.grid_lon.toFixed(4)}
+                </td>
+                <td className="px-3 py-2">{row.predicted_next_confirmed.toFixed(2)}</td>
+                <td className="px-3 py-2">{formatTrajectory(row.predicted_trajectory)}</td>
+                <td className="px-3 py-2">
+                  {row.actual_trajectory ? formatTrajectory(row.actual_trajectory) : "-"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function formatTrajectory(values: number[]): string {
+  return values.map((value) => value.toFixed(2)).join(" -> ");
 }

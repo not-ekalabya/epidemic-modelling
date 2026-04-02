@@ -357,6 +357,8 @@ class SpatioTemporalCovidRLModel:
         self,
         df: pd.DataFrame,
         reference_week: str | pd.Timestamp | None = None,
+        require_nonzero_actuals: bool = False,
+        fallback_to_latest_nonzero_actual: bool = False,
     ) -> dict[str, object]:
         batch = self.evaluation_batch(df)
         if len(batch.metadata) == 0:
@@ -370,19 +372,71 @@ class SpatioTemporalCovidRLModel:
         else:
             selected_week = pd.to_datetime(reference_week).to_period("M").start_time
 
+        requested_week = selected_week
+
         selected_mask = metadata["reference_week"] == selected_week
         if not selected_mask.any():
             raise ValueError(f"No evaluation episodes found for reference week {selected_week}.")
 
-        states = batch.states[selected_mask.to_numpy()]
-        actuals = batch.targets[selected_mask.to_numpy()]
+        selected_indices = np.flatnonzero(selected_mask.to_numpy())
+        if require_nonzero_actuals and not np.any(batch.targets[selected_indices] > 0):
+            if not fallback_to_latest_nonzero_actual:
+                raise ValueError(
+                    "No non-zero actual trajectory is available for "
+                    f"reference week {selected_week.strftime('%Y-%m-%d')}."
+                )
+
+            available_weeks = sorted(metadata["reference_week"].drop_duplicates().tolist())
+            fallback_week: pd.Timestamp | None = None
+            for week in reversed(available_weeks):
+                if week > selected_week:
+                    continue
+                week_mask = metadata["reference_week"] == week
+                week_indices = np.flatnonzero(week_mask.to_numpy())
+                if len(week_indices) == 0:
+                    continue
+                if np.any(batch.targets[week_indices] > 0):
+                    fallback_week = week
+                    break
+
+            if fallback_week is None:
+                raise ValueError(
+                    "No reference week with non-zero actual trajectories exists in the evaluation dataset."
+                )
+
+            selected_week = fallback_week
+            selected_mask = metadata["reference_week"] == selected_week
+            selected_indices = np.flatnonzero(selected_mask.to_numpy())
+
+        states = batch.states[selected_indices]
+        actuals = batch.targets[selected_indices]
         predictions = self._predict_from_normalized_states(self._normalize_states(states))
+        selected_metadata = metadata.iloc[selected_indices].reset_index(drop=True)
+
+        per_cell_progression: list[dict[str, object]] = []
+        for idx, row in selected_metadata.iterrows():
+            per_cell_progression.append(
+                {
+                    "grid_lat": float(row["grid_lat"]),
+                    "grid_lon": float(row["grid_lon"]),
+                    "predicted_next_confirmed": float(predictions[idx][0]),
+                    "predicted_trajectory": predictions[idx].tolist(),
+                    "actual_trajectory": actuals[idx].tolist(),
+                }
+            )
+
+        per_cell_progression.sort(
+            key=lambda cell: float(cell["predicted_next_confirmed"]),
+            reverse=True,
+        )
 
         return {
+            "requested_reference_week": requested_week,
             "reference_week": selected_week,
             "cell_count": int(selected_mask.sum()),
             "predicted_trajectory": predictions.sum(axis=0).tolist(),
             "actual_trajectory": actuals.sum(axis=0).tolist(),
+            "per_cell_progression": per_cell_progression,
         }
 
     def _prepare_weekly_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
