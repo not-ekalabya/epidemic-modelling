@@ -16,13 +16,13 @@ from helpers.data_demographics import (
     DEMOGRAPHICS_COLUMNS,
     MEAN_DEMOGRAPHICS_COLUMNS,
 )
-from helpers.data_mobility import MOBILITY_COLUMNS
 
+from helpers.data_mobility import MOBILITY_COLUMNS
 
 @dataclass
 class EpisodeBatch:
     states: np.ndarray
-    targets: np.ndarray
+    targets: np.ndarray 
     metadata: pd.DataFrame
 
 
@@ -53,6 +53,9 @@ class SpatioTemporalCovidRLModel:
         random_seed: int = 42,
         show_progress: bool = True,
         data_sources: list[str] | None = None,
+        l2_regularization: float = 0.0001,
+        learning_rate_decay: float = 0.999,
+        output_clip_max: float = 10000.0,
     ) -> None:
         if history_weeks < 1:
             raise ValueError("history_weeks must be >= 1")
@@ -74,6 +77,9 @@ class SpatioTemporalCovidRLModel:
         self.data_sources = list(
             ["population_density", "mobility"] if data_sources is None else data_sources
         )
+        self.l2_regularization = l2_regularization
+        self.learning_rate_decay = learning_rate_decay
+        self.output_clip_max = output_clip_max
 
         self.layer_weights_: list[np.ndarray] = []
         self.layer_biases_: list[np.ndarray] = []
@@ -109,6 +115,7 @@ class SpatioTemporalCovidRLModel:
         )
 
         self.training_history_ = []
+        current_lr = self.learning_rate
 
         epoch_iterator = range(self.epochs)
         if self.show_progress:
@@ -121,7 +128,12 @@ class SpatioTemporalCovidRLModel:
         for epoch in epoch_iterator:
             activations, pre_activations = self._forward_train(x)
             predicted_log_targets = activations[-1]
-            loss = float(np.mean(np.square(predicted_log_targets - log_targets)))
+            
+            # Add L2 regularization to loss
+            l2_loss = sum(np.sum(w ** 2) for w in self.layer_weights_) * self.l2_regularization
+            mse_loss = float(np.mean(np.square(predicted_log_targets - log_targets)))
+            loss = mse_loss + l2_loss
+            
             grad_output = 2.0 * (predicted_log_targets - log_targets) / len(x)
             grad_weights, grad_biases = self._backward(
                 activations=activations,
@@ -130,12 +142,13 @@ class SpatioTemporalCovidRLModel:
             )
 
             for layer_index in range(len(self.layer_weights_)):
-                self.layer_weights_[layer_index] -= (
-                    self.learning_rate * grad_weights[layer_index]
-                )
-                self.layer_biases_[layer_index] -= (
-                    self.learning_rate * grad_biases[layer_index]
-                )
+                # Add L2 gradient
+                grad_weights[layer_index] += 2 * self.l2_regularization * self.layer_weights_[layer_index]
+                self.layer_weights_[layer_index] -= current_lr * grad_weights[layer_index]
+                self.layer_biases_[layer_index] -= current_lr * grad_biases[layer_index]
+            
+            # Decay learning rate
+            current_lr *= self.learning_rate_decay
 
             predictions = self._predict_from_log_space(predicted_log_targets)
             mean_area = float(self._area(predictions, targets).mean())
@@ -172,10 +185,16 @@ class SpatioTemporalCovidRLModel:
             cell_lon=cell_lon,
             weekly_df=weekly_df,
         )
-        cell_df = weekly_df[
-            (weekly_df["grid_lat"] == resolved_lat)
-            & (weekly_df["grid_lon"] == resolved_lon)
-        ].sort_values("week").reset_index(drop=True)
+        cell_key_columns = self._cell_key_columns(weekly_df)
+        cell_filters = {col: resolved_lat if col == "grid_lat" else resolved_lon if col == "grid_lon" else resolved_val 
+                       for col, resolved_val in zip(cell_key_columns, [resolved_lat, resolved_lon][-len(cell_key_columns)+2:] if len(cell_key_columns) > 2 else [resolved_lat, resolved_lon])}
+        cell_mask = np.ones(len(weekly_df), dtype=bool)
+        for col in cell_key_columns:
+            if col == "grid_lat":
+                cell_mask &= (weekly_df["grid_lat"] == resolved_lat)
+            elif col == "grid_lon":
+                cell_mask &= (weekly_df["grid_lon"] == resolved_lon)
+        cell_df = weekly_df[cell_mask].sort_values("week").reset_index(drop=True)
         cell_history_df = self._cell_history_frame(cell_df)
         neighborhood_df = self._neighborhood_frame(weekly_df, resolved_lat, resolved_lon)
         neighborhood_history_df = self._neighborhood_history_frame(neighborhood_df)
@@ -523,7 +542,8 @@ class SpatioTemporalCovidRLModel:
                 raise ValueError("Either df or weekly_df must be provided.")
             weekly_df = self._prepare_weekly_dataframe(df)
 
-        available_cells = weekly_df[["grid_lat", "grid_lon"]].drop_duplicates()
+        cell_key_columns = self._cell_key_columns(weekly_df)
+        available_cells = weekly_df[cell_key_columns].drop_duplicates()
 
         exact_match = available_cells[
             (available_cells["grid_lat"] == cell_lat)
@@ -557,10 +577,16 @@ class SpatioTemporalCovidRLModel:
     @staticmethod
     def _cell_key_columns(df: pd.DataFrame) -> list[str]:
         key_columns = ["grid_lat", "grid_lon"]
-        for column in ("country_iso2", "country_iso3"):
-            if column in df.columns:
-                key_columns.insert(0, column)
+        if "country_iso2" in df.columns:
+            key_columns = ["country_iso2"] + key_columns
         return key_columns
+
+    @staticmethod
+    @staticmethod
+    def _normalize_cell_group_key(cell_key: object) -> tuple[object, ...]:
+        if isinstance(cell_key, tuple):
+            return cell_key
+        return (cell_key,)
 
     def _build_episode_batch(self, weekly_df: pd.DataFrame) -> EpisodeBatch:
         rows: list[np.ndarray] = []
@@ -745,13 +771,8 @@ class SpatioTemporalCovidRLModel:
     @staticmethod
     def _normalize_cell_group_key(cell_key: object) -> tuple[object, ...]:
         if isinstance(cell_key, tuple):
-            normalized = list(cell_key)
-        else:
-            normalized = [cell_key]
-
-        normalized[-2] = float(normalized[-2])
-        normalized[-1] = float(normalized[-1])
-        return tuple(normalized)
+            return cell_key
+        return (cell_key,)
 
     def _neighborhood_history_frame(
         self,
@@ -946,9 +967,10 @@ class SpatioTemporalCovidRLModel:
                 current = np.maximum(current, 0.0)
         return current
 
-    @staticmethod
-    def _predict_from_log_space(log_predictions: np.ndarray) -> np.ndarray:
-        return np.expm1(np.maximum(log_predictions, 0.0))
+    def _predict_from_log_space(self, log_predictions: np.ndarray) -> np.ndarray:
+        # Clip log predictions to prevent extreme values
+        log_predictions_clipped = np.clip(log_predictions, -3, np.log(self.output_clip_max))
+        return np.expm1(log_predictions_clipped)
 
     def _predict_from_normalized_states(self, normalized_states: np.ndarray) -> np.ndarray:
         return self._predict_from_log_space(self._predict_raw(normalized_states))
@@ -973,6 +995,9 @@ def train_rl_covid_model(
     random_seed: int = 42,
     show_progress: bool = True,
     data_sources: list[str] | None = None,
+    l2_regularization: float = 0.0001,
+    learning_rate_decay: float = 0.995,
+    output_clip_max: float = 10000.0,
 ) -> SpatioTemporalCovidRLModel:
     return train_supervised_covid_model(
         df=df,
@@ -986,6 +1011,9 @@ def train_rl_covid_model(
         random_seed=random_seed,
         show_progress=show_progress,
         data_sources=data_sources,
+        l2_regularization=l2_regularization,
+        learning_rate_decay=learning_rate_decay,
+        output_clip_max=output_clip_max,
     )
 
 
@@ -1001,6 +1029,9 @@ def train_supervised_covid_model(
     random_seed: int = 42,
     show_progress: bool = True,
     data_sources: list[str] | None = None,
+    l2_regularization: float = 0.0001,
+    learning_rate_decay: float = 0.995,
+    output_clip_max: float = 10000.0,
 ) -> SpatioTemporalCovidRLModel:
     model = SpatioTemporalCovidRLModel(
         history_weeks=history_weeks,
@@ -1013,6 +1044,9 @@ def train_supervised_covid_model(
         random_seed=random_seed,
         show_progress=show_progress,
         data_sources=data_sources,
+        l2_regularization=l2_regularization,
+        learning_rate_decay=learning_rate_decay,
+        output_clip_max=output_clip_max,
     )
     return model.fit(df)
 
@@ -1106,7 +1140,7 @@ if __name__ == "__main__":
     HISTORY_WEEKS = 12
     FORECAST_WEEKS = 4
     RADIUS = 1.5
-    EPOCHS = 50
+    EPOCHS = 100  # Increased for better convergence
     SHOW_PROGRESS = True
     SAVE_MODEL = True
     VISUALIZE_PROGRESS = True
@@ -1125,6 +1159,9 @@ if __name__ == "__main__":
         epochs=EPOCHS,
         show_progress=SHOW_PROGRESS,
         data_sources=DATA_SOURCES,
+        l2_regularization=0.0001,  # Prevent overfitting
+        learning_rate_decay=0.995,  # Decay learning rate during training
+        output_clip_max=10000.0,  # Prevent extreme predictions
     )
 
     metrics = model.score(dataset)
