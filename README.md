@@ -42,8 +42,6 @@ python preprocessing.py
 python model.py
 ```
 
-## Model Training Description
-
 The model is trained using a structured spatio-temporal dataset, and a cache file is generated during preprocessing to eliminate redundant data loading and significantly improve computational efficiency in subsequent runs. This caching mechanism ensures that once the dataset has been transformed into the required grid-based temporal format, it can be reused without repeating expensive preprocessing steps such as aggregation, normalization, and feature construction.
 
 The current implementation follows a single-country training paradigm, where the model is trained independently on data corresponding to one country at a time. This allows the model to better capture region-specific transmission dynamics, demographic patterns, and mobility trends without interference from cross-country heterogeneity. Each country’s dataset is discretized into spatial grid cells (e.g., 20 km resolution), and temporal data is aggregated into weekly intervals to form consistent time-series inputs.
