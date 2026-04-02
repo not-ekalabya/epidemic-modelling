@@ -23,16 +23,16 @@ class EpisodeBatch:
 
 class SpatioTemporalCovidRLModel:
     """
-    Policy-gradient model for forecasting confirmed cases in a grid cell.
+    Supervised MLP model for forecasting confirmed cases in a grid cell.
 
-    The policy observes:
+    The model observes:
     - last `history_weeks` of target-cell progression
     - last `history_weeks` of neighborhood progression inside radius `radius`
     - optional external source features such as mobility or population density
 
-    The action is a non-negative future trajectory of confirmed cases over
-    `forecast_weeks`. Reward is inverse to the area between predicted and
-    actual cumulative-confirmed curves.
+    The output is a non-negative future trajectory of confirmed cases over
+    `forecast_weeks`. Training uses a supervised regression objective on
+    log-transformed targets.
     """
 
     def __init__(
@@ -44,6 +44,7 @@ class SpatioTemporalCovidRLModel:
         noise_scale: float = 0.2,
         epochs: int = 250,
         pretrain_epochs: int = 100,
+        hidden_dims: tuple[int, ...] = (128, 64),
         random_seed: int = 42,
         show_progress: bool = True,
         data_sources: list[str] | None = None,
@@ -62,12 +63,15 @@ class SpatioTemporalCovidRLModel:
         self.noise_scale = noise_scale
         self.epochs = epochs
         self.pretrain_epochs = pretrain_epochs
+        self.hidden_dims = tuple(hidden_dims)
         self.random_seed = random_seed
         self.show_progress = show_progress
-        self.data_sources = list(data_sources or ["population_density", "mobility"])
+        self.data_sources = list(
+            ["population_density", "mobility"] if data_sources is None else data_sources
+        )
 
-        self.weights: np.ndarray | None = None
-        self.bias: np.ndarray | None = None
+        self.layer_weights_: list[np.ndarray] = []
+        self.layer_biases_: list[np.ndarray] = []
         self.feature_mean_: np.ndarray | None = None
         self.feature_std_: np.ndarray | None = None
         self.training_history_: list[dict[str, float]] = []
@@ -91,81 +95,56 @@ class SpatioTemporalCovidRLModel:
         self.feature_std_[self.feature_std_ == 0] = 1.0
 
         x = self._normalize_states(states)
+        log_targets = np.log1p(targets)
         rng = np.random.default_rng(self.random_seed)
-
-        self.weights = rng.normal(
-            loc=0.0,
-            scale=0.05,
-            size=(x.shape[1], self.forecast_weeks),
+        self.layer_weights_, self.layer_biases_ = self._initialize_network(
+            input_dim=x.shape[1],
+            output_dim=self.forecast_weeks,
+            rng=rng,
         )
-        self.bias = self._inverse_softplus(targets.mean(axis=0))
-        baseline = 0.0
 
         self.training_history_ = []
-
-        if self.pretrain_epochs > 0:
-            pretrain_iterator = range(self.pretrain_epochs)
-            if self.show_progress:
-                pretrain_iterator = tqdm(
-                    pretrain_iterator,
-                    total=self.pretrain_epochs,
-                    desc="Supervised warm start",
-                )
-
-            for _ in pretrain_iterator:
-                logits = x @ self.weights + self.bias
-                predictions = self._positive_output(logits)
-                grad_logits = (
-                    2.0 * (predictions - targets) * self._sigmoid(logits)
-                ) / len(x)
-
-                self.weights -= self.learning_rate * (x.T @ grad_logits)
-                self.bias -= self.learning_rate * grad_logits.sum(axis=0)
-
-                if self.show_progress:
-                    rmse = float(np.sqrt(np.mean(np.square(predictions - targets))))
-                    pretrain_iterator.set_postfix(rmse=f"{rmse:.2f}")
 
         epoch_iterator = range(self.epochs)
         if self.show_progress:
             epoch_iterator = tqdm(
                 epoch_iterator,
                 total=self.epochs,
-                desc="Training RL model",
+                desc="Training supervised MLP",
             )
 
         for epoch in epoch_iterator:
-            logits = x @ self.weights + self.bias
-            means = self._positive_output(logits)
-            noise = rng.normal(size=logits.shape)
-            sampled_logits = logits + self.noise_scale * noise
-            actions = self._positive_output(sampled_logits)
-            rewards = self._reward(actions, targets)
+            activations, pre_activations = self._forward_train(x)
+            predicted_log_targets = activations[-1]
+            loss = float(np.mean(np.square(predicted_log_targets - log_targets)))
+            grad_output = 2.0 * (predicted_log_targets - log_targets) / len(x)
+            grad_weights, grad_biases = self._backward(
+                activations=activations,
+                pre_activations=pre_activations,
+                grad_output=grad_output,
+            )
 
-            baseline = 0.9 * baseline + 0.1 * float(rewards.mean())
-            advantages = rewards - baseline
+            for layer_index in range(len(self.layer_weights_)):
+                self.layer_weights_[layer_index] -= (
+                    self.learning_rate * grad_weights[layer_index]
+                )
+                self.layer_biases_[layer_index] -= (
+                    self.learning_rate * grad_biases[layer_index]
+                )
 
-            if self.noise_scale <= 0:
-                raise ValueError("noise_scale must be positive for policy-gradient")
-
-            grad_logits = (
-                (sampled_logits - logits) / (self.noise_scale ** 2)
-            ) * advantages[:, None] / len(x)
-
-            self.weights += self.learning_rate * x.T @ grad_logits
-            self.bias += self.learning_rate * grad_logits.sum(axis=0)
-
-            mean_area = float(self._area(actions, targets).mean())
+            predictions = self._predict_from_log_space(predicted_log_targets)
+            mean_area = float(self._area(predictions, targets).mean())
             self.training_history_.append(
                 {
                     "epoch": float(epoch + 1),
-                    "reward": float(rewards.mean()),
+                    "loss": loss,
                     "mean_area": mean_area,
+                    "rmse": float(np.sqrt(np.mean(np.square(predictions - targets)))),
                 }
             )
             if self.show_progress:
                 epoch_iterator.set_postfix(
-                    reward=f"{rewards.mean():.4f}",
+                    loss=f"{loss:.4f}",
                     area=f"{mean_area:.2f}",
                 )
 
@@ -207,7 +186,7 @@ class SpatioTemporalCovidRLModel:
             reference_week=prediction_date,
         )
         x = self._normalize_states(state_vector[None, :])
-        trajectory = self._positive_output(x @ self.weights + self.bias)[0]
+        trajectory = self._predict_from_normalized_states(x)[0]
 
         return {
             "cell": {"grid_lat": resolved_lat, "grid_lon": resolved_lon},
@@ -225,7 +204,7 @@ class SpatioTemporalCovidRLModel:
             raise ValueError("No evaluation samples available.")
 
         x = self._normalize_states(batch.states)
-        predictions = self._positive_output(x @ self.weights + self.bias)
+        predictions = self._predict_from_normalized_states(x)
         rewards = self._reward(predictions, batch.targets)
         area = self._area(predictions, batch.targets)
         errors = predictions - batch.targets
@@ -305,10 +284,16 @@ class SpatioTemporalCovidRLModel:
         model_prefix = os.path.join(output_dir, f"spatiotemporal_covid_rl_{version}")
         np.savez(
             f"{model_prefix}.npz",
-            weights=self.weights,
-            bias=self.bias,
             feature_mean=self.feature_mean_,
             feature_std=self.feature_std_,
+            **{
+                f"layer_weight_{index}": weights
+                for index, weights in enumerate(self.layer_weights_)
+            },
+            **{
+                f"layer_bias_{index}": bias
+                for index, bias in enumerate(self.layer_biases_)
+            },
         )
 
         metadata = {
@@ -318,6 +303,7 @@ class SpatioTemporalCovidRLModel:
             "learning_rate": self.learning_rate,
             "noise_scale": self.noise_scale,
             "epochs": self.epochs,
+            "hidden_dims": list(self.hidden_dims),
             "random_seed": self.random_seed,
             "data_sources": self.data_sources,
             "training_history": self.training_history_,
@@ -347,16 +333,22 @@ class SpatioTemporalCovidRLModel:
             learning_rate=float(metadata["learning_rate"]),
             noise_scale=float(metadata["noise_scale"]),
             epochs=int(metadata["epochs"]),
+            hidden_dims=tuple(metadata.get("hidden_dims", [128, 64])),
             random_seed=int(metadata["random_seed"]),
             show_progress=False,
             data_sources=metadata.get("data_sources"),
         )
 
         weights = np.load(weights_path)
-        model.weights = weights["weights"]
-        model.bias = weights["bias"]
         model.feature_mean_ = weights["feature_mean"]
         model.feature_std_ = weights["feature_std"]
+        layer_indices = sorted(
+            int(key.rsplit("_", 1)[-1])
+            for key in weights.files
+            if key.startswith("layer_weight_")
+        )
+        model.layer_weights_ = [weights[f"layer_weight_{index}"] for index in layer_indices]
+        model.layer_biases_ = [weights[f"layer_bias_{index}"] for index in layer_indices]
         model.training_history_ = metadata.get("training_history", [])
 
         return model
@@ -384,9 +376,7 @@ class SpatioTemporalCovidRLModel:
 
         states = batch.states[selected_mask.to_numpy()]
         actuals = batch.targets[selected_mask.to_numpy()]
-        predictions = self._positive_output(
-            self._normalize_states(states) @ self.weights + self.bias
-        )
+        predictions = self._predict_from_normalized_states(self._normalize_states(states))
 
         return {
             "reference_week": selected_week,
@@ -778,27 +768,88 @@ class SpatioTemporalCovidRLModel:
         actual_curve = np.cumsum(actuals, axis=1)
         return np.trapezoid(np.abs(predicted_curve - actual_curve), axis=1)
 
-    @staticmethod
-    def _positive_output(values: np.ndarray) -> np.ndarray:
-        return np.log1p(np.exp(-np.abs(values))) + np.maximum(values, 0.0)
+    def _initialize_network(
+        self,
+        input_dim: int,
+        output_dim: int,
+        rng: np.random.Generator,
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        layer_dims = [input_dim, *self.hidden_dims, output_dim]
+        layer_weights: list[np.ndarray] = []
+        layer_biases: list[np.ndarray] = []
+
+        for in_dim, out_dim in zip(layer_dims[:-1], layer_dims[1:]):
+            scale = np.sqrt(2.0 / max(in_dim, 1))
+            layer_weights.append(rng.normal(0.0, scale, size=(in_dim, out_dim)))
+            layer_biases.append(np.zeros(out_dim, dtype=float))
+
+        return layer_weights, layer_biases
+
+    def _forward_train(
+        self,
+        inputs: np.ndarray,
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        activations = [inputs]
+        pre_activations: list[np.ndarray] = []
+        current = inputs
+
+        for layer_index, (weights, bias) in enumerate(
+            zip(self.layer_weights_, self.layer_biases_)
+        ):
+            linear = current @ weights + bias
+            pre_activations.append(linear)
+            if layer_index == len(self.layer_weights_) - 1:
+                current = linear
+            else:
+                current = np.maximum(linear, 0.0)
+            activations.append(current)
+
+        return activations, pre_activations
+
+    def _backward(
+        self,
+        activations: list[np.ndarray],
+        pre_activations: list[np.ndarray],
+        grad_output: np.ndarray,
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        grad_weights: list[np.ndarray] = [np.empty(0)] * len(self.layer_weights_)
+        grad_biases: list[np.ndarray] = [np.empty(0)] * len(self.layer_biases_)
+        grad_current = grad_output
+
+        for layer_index in range(len(self.layer_weights_) - 1, -1, -1):
+            grad_weights[layer_index] = activations[layer_index].T @ grad_current
+            grad_biases[layer_index] = grad_current.sum(axis=0)
+            if layer_index == 0:
+                continue
+            grad_hidden = grad_current @ self.layer_weights_[layer_index].T
+            grad_current = grad_hidden * (pre_activations[layer_index - 1] > 0)
+
+        return grad_weights, grad_biases
+
+    def _predict_raw(self, normalized_states: np.ndarray) -> np.ndarray:
+        self._check_is_fitted()
+        current = normalized_states
+        for layer_index, (weights, bias) in enumerate(
+            zip(self.layer_weights_, self.layer_biases_)
+        ):
+            current = current @ weights + bias
+            if layer_index < len(self.layer_weights_) - 1:
+                current = np.maximum(current, 0.0)
+        return current
 
     @staticmethod
-    def _sigmoid(values: np.ndarray) -> np.ndarray:
-        return 1.0 / (1.0 + np.exp(-values))
+    def _predict_from_log_space(log_predictions: np.ndarray) -> np.ndarray:
+        return np.expm1(np.maximum(log_predictions, 0.0))
 
-    @staticmethod
-    def _inverse_softplus(values: np.ndarray) -> np.ndarray:
-        clipped = np.maximum(values, 1e-6)
-        return np.where(
-            clipped > 20.0,
-            clipped,
-            np.log(np.expm1(clipped)),
-        )
+    def _predict_from_normalized_states(self, normalized_states: np.ndarray) -> np.ndarray:
+        return self._predict_from_log_space(self._predict_raw(normalized_states))
 
     def _check_is_fitted(self, allow_pre_fit_stats: bool = False) -> None:
         if self.feature_mean_ is None or self.feature_std_ is None:
             raise ValueError("Model has not been fitted yet.")
-        if not allow_pre_fit_stats and (self.weights is None or self.bias is None):
+        if not allow_pre_fit_stats and (
+            not self.layer_weights_ or not self.layer_biases_
+        ):
             raise ValueError("Model has not been fitted yet.")
 
 def train_rl_covid_model(
@@ -809,6 +860,35 @@ def train_rl_covid_model(
     learning_rate: float = 0.001,
     noise_scale: float = 0.2,
     epochs: int = 250,
+    hidden_dims: tuple[int, ...] = (128, 64),
+    random_seed: int = 42,
+    show_progress: bool = True,
+    data_sources: list[str] | None = None,
+) -> SpatioTemporalCovidRLModel:
+    return train_supervised_covid_model(
+        df=df,
+        history_weeks=history_weeks,
+        forecast_weeks=forecast_weeks,
+        radius=radius,
+        learning_rate=learning_rate,
+        noise_scale=noise_scale,
+        epochs=epochs,
+        hidden_dims=hidden_dims,
+        random_seed=random_seed,
+        show_progress=show_progress,
+        data_sources=data_sources,
+    )
+
+
+def train_supervised_covid_model(
+    df: pd.DataFrame,
+    history_weeks: int = 4,
+    forecast_weeks: int = 2,
+    radius: float = 1.0,
+    learning_rate: float = 0.001,
+    noise_scale: float = 0.2,
+    epochs: int = 250,
+    hidden_dims: tuple[int, ...] = (128, 64),
     random_seed: int = 42,
     show_progress: bool = True,
     data_sources: list[str] | None = None,
@@ -820,6 +900,7 @@ def train_rl_covid_model(
         learning_rate=learning_rate,
         noise_scale=noise_scale,
         epochs=epochs,
+        hidden_dims=hidden_dims,
         random_seed=random_seed,
         show_progress=show_progress,
         data_sources=data_sources,
@@ -912,6 +993,7 @@ if __name__ == "__main__":
         {"country_iso2": "TH", "country_iso3": "THA", "grid_km": 20}, # Thailand
         {"country_iso2": "VN", "country_iso3": "VNM", "grid_km": 20}, # Vietnam
     ]
+    DATA_SOURCES = ["mobility"]
     HISTORY_WEEKS = 12
     FORECAST_WEEKS = 4
     RADIUS = 1.5
@@ -921,7 +1003,10 @@ if __name__ == "__main__":
     VISUALIZE_PROGRESS = True
     VISUALIZATION_OUTPUT_PATH = "figures/latest_prediction_vs_actual.png"
 
-    dataset = load_multi_country_dataset(COUNTRY_CONFIGS)
+    dataset = load_multi_country_dataset(
+        COUNTRY_CONFIGS,
+        data_sources=DATA_SOURCES,
+    )
 
     model = train_rl_covid_model(
         df=dataset,
@@ -930,6 +1015,7 @@ if __name__ == "__main__":
         radius=RADIUS,
         epochs=EPOCHS,
         show_progress=SHOW_PROGRESS,
+        data_sources=DATA_SOURCES,
     )
 
     metrics = model.score(dataset)

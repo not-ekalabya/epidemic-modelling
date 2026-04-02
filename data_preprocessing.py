@@ -17,7 +17,9 @@ def get_spatiotemporal_covid_dataset(
     grid_km: int = 1,
     data_sources: list[str] | None = None,
 ) -> pd.DataFrame:
-    selected_sources = set(data_sources or ["population_density", "mobility"])
+    selected_sources = set(
+        ["population_density", "mobility"] if data_sources is None else data_sources
+    )
 
     pop_grid: pd.DataFrame | None = None
     if "population_density" in selected_sources:
