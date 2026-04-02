@@ -258,7 +258,7 @@ class ServerState:
 
 
 app = FastAPI(
-    title="CodeCure Prediction API",
+    title="PandemicDots Prediction API",
     version="1.0.0",
     description="HTTP interface for COVID progression predictions using the local RL model.",
 )

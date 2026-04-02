@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CodeCure Prediction Dashboard",
+  title: "PandemicDots Prediction Dashboard",
   description: "Interactive COVID prediction dashboard with map-based cell exploration.",
 };
 

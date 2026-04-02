@@ -1,222 +1,238 @@
-#  Epidemic Progression Modelling: CodeCure
+# Epidemic Progression Modelling: PandemicDots
 
-A machine learning–driven system for modeling and analyzing epidemic spread using spatiotemporal data, mobility patterns, and demographic features.
+PandemicDots is a spatiotemporal forecasting system for COVID progression. It combines epidemiological time series with mobility and demographic context, then predicts short-horizon future confirmed cases at grid-cell level and country-total level.
 
----
+## What Is Included
 
-##  Getting Started
+- FastAPI backend for metadata, prediction, and country configuration endpoints
+- Python training pipeline for a supervised spatiotemporal forecasting model
+- Data helper modules for COVID, mobility, demographics, and population density sources
+- Next.js client app under `client/` for interactive visualization and API interaction
 
-### 1. Install Dependencies
+## Prerequisites
+
+- Python 3.11 recommended
+- pip
+- Node.js 20+ and npm (for the frontend)
+- Optional for containerized run: Docker and Docker Compose plugin
+
+## Local Setup (Backend + Model)
+
+1. Clone and enter the repository.
 
 ```bash
+git clone <your-repo-url>
+cd PandemicDots
+```
+
+2. Create and activate a virtual environment.
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+3. Install backend dependencies.
+
+```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
----
-
-### 2. Run the FastAPI Server
+4. Start the API server.
 
 ```bash
-uvicorn server.server:app --port 8000
+uvicorn server.server:app --host 0.0.0.0 --port 8000
 ```
 
-Once running, the API will be available at:
-
-```
-http://127.0.0.1:8000
-```
-
----
-
-## Model Training
-
-### Step 1: Data Preprocessing
+5. Verify API health.
 
 ```bash
-python preprocessing.py
+curl http://127.0.0.1:8000/health
 ```
 
-### Step 2: Train Model
+Useful API routes:
+
+- `GET /health`
+- `GET /metadata`
+- `POST /predict`
+- `POST /config/country`
+
+## Local Setup (Frontend)
+
+1. Open a new terminal and install frontend dependencies.
+
+```bash
+cd client
+npm install
+```
+
+2. Configure API base URL for the Next.js route handlers.
+
+```bash
+echo "PREDICTION_API_BASE_URL=http://127.0.0.1:8000" > .env.local
+```
+
+3. Start frontend development server.
+
+```bash
+npm run dev
+```
+
+4. Open `http://localhost:3000`.
+
+## Container Setup
+
+The repository includes a backend Docker build file at `dockerfile`.
+
+Build the backend image:
+
+```bash
+docker build -f dockerfile -t pandemicdots-api .
+```
+
+Run the backend container:
+
+```bash
+docker run --rm -p 8000:8000 pandemicdots-api
+```
+
+If you add a Compose file later for full-stack orchestration, connect frontend and backend through internal service DNS and set `PREDICTION_API_BASE_URL` accordingly.
+
+## Training Workflow
+
+### Step 1: Build/refresh dataset features
+
+The preprocessing logic is integrated via `data_preprocessing.py` and invoked by model-loading utilities.
+
+### Step 2: Train model
 
 ```bash
 python model.py
 ```
 
-The model is trained using a structured spatio-temporal dataset, and a cache file is generated during preprocessing to eliminate redundant data loading and significantly improve computational efficiency in subsequent runs. This caching mechanism ensures that once the dataset has been transformed into the required grid-based temporal format, it can be reused without repeating expensive preprocessing steps such as aggregation, normalization, and feature construction.
+This script:
 
-The current implementation follows a single-country training paradigm, where the model is trained independently on data corresponding to one country at a time. This allows the model to better capture region-specific transmission dynamics, demographic patterns, and mobility trends without interference from cross-country heterogeneity. Each country’s dataset is discretized into spatial grid cells (e.g., 20 km resolution), and temporal data is aggregated into weekly intervals to form consistent time-series inputs.
+- loads spatiotemporal country data
+- trains the forecasting model
+- computes metrics
+- emits a country progression report
+- optionally saves model artifacts under `models/`
 
-During training, the model constructs multiple training episodes by sliding a temporal window of length k weeks over the dataset. For each episode, the model takes as input:
+## Model Architecture (Technical Overview)
 
-historical infection trends within a target grid cell,
-infection dynamics from neighboring cells within a specified spatial radius, and
-auxiliary features such as mobility indicators and population density.
+The core model class is `SpatioTemporalCovidRLModel` in `model.py`. Despite the historical name, the training path is supervised regression over forecast trajectories.
 
-The model is implemented as a multi-layer perceptron (MLP) with hidden layers that learn complex non-linear relationships between spatial and temporal features. Training is performed over multiple epochs using a gradient-based optimization process, where the objective is to minimize the difference between predicted and actual infection trajectories.
+### Input representation
 
-To stabilize training and handle the highly skewed distribution of case counts, the target values are transformed into log space before optimization. Additionally, input features are normalized using mean and standard deviation computed from the training data.
+For each training episode, the state vector is formed by concatenating:
 
-A key aspect of the training process is the use of a trajectory-based error metric, where the discrepancy between predicted and actual cumulative case curves is measured as the area between the two curves. This formulation encourages the model to capture not only point-wise accuracy but also the overall progression trend of the epidemic.
+- target-cell history over `history_weeks`
+- neighborhood history over `history_weeks` within radius `radius`
+- optional external features based on enabled `data_sources`:
+  - mobility indicators
+  - demographics indicators
+  - population density
 
-Overall, the training pipeline is designed to efficiently learn spatio-temporal dependencies while maintaining scalability and adaptability to different regional datasets.
+The dataset is aggregated into monthly buckets (`to_period("M")`) and grouped by spatial grid coordinates.
 
-## 🌍 Configuring Country Data
+### Network structure
 
-To run the model for a specific country, modify the following variables in `main.py`:
+- Feed-forward MLP with configurable hidden dimensions (`hidden_dims`)
+- Default hidden layers: `(128, 64)`
+- Output dimension: `forecast_weeks` (multi-step trajectory)
+- Output clipped to non-negative bounded range via `output_clip_max`
 
-```python
-COUNTRY_ISO2 = "BD"   # Example: Bangladesh
-COUNTRY_ISO3 = "BGD"
-```
+### Optimization and stabilization
 
-You can replace these with any valid ISO country codes to fetch:
+- Targets transformed with `log1p` before optimization
+- Feature-wise normalization using training mean and std (`feature_mean_`, `feature_std_`)
+- Learning rate decay (`learning_rate_decay`)
+- L2 regularization (`l2_regularization`)
+- Optional training noise scaling (`noise_scale`)
 
-* Population density
-* Mobility trends
-* Epidemiological data
+### Prediction outputs
 
----
+For each reference month, the model produces:
 
-## 📁 Project Structure
+- next-step predicted confirmed cases
+- full multi-step trajectory of length `forecast_weeks`
+- optional per-cell decomposition in country-level reports
 
-```
-├── server/                # FastAPI backend
-├── helpers/               # Data fetching and utility scripts
-├── visual_analysis/       # Analysis and plotting utilities
-├── data/                  # Cached datasets
-├── model.py               # Core ML model
-├── preprocessing.py       # Data preparation pipeline
-├── requirements.txt
-└── Dockerfile
-```
+### Evaluation metrics
 
----
+Implemented scoring includes:
 
-## 📊 Data Pipeline Overview
+- RMSE
+- MAE
+- MAPE
+- $R^2$
+- mean reward (trajectory-based)
+- mean area error between predicted and actual trajectories
 
-The project integrates multiple datasets:
+The plotting utility `visualize_prediction_progress` compares monthly predictions and cumulative curves and highlights area error.
 
-### 1. Epidemiological Data
+## Runtime Configuration
 
-* Source: Google COVID-19 Open Data
-* Includes: cases, deaths, recoveries
+The API behavior can be controlled using environment variables in `server/server.py`:
 
-### 2. Mobility Data
-
-* Tracks population movement trends
-
-### 3. Demographics Data
-
-* Includes population density and regional attributes
-
----
-
-## 📦 Data Handling Notes
-
-* `helpers/data_covid.py`
-  → Downloads and caches epidemiology + geography data
-
-* `helpers/data_mobility.py`
-  → Downloads and caches mobility datasets
-
-* `helpers/data_demographics.py`
-  → Downloads and caches demographic datasets
-
-* Cached location mappings stored in:
-
-```
-data/covid/location_lookup/
-```
-
-This improves performance by avoiding repeated joins.
-
----
-
-## 📈 Output & Evaluation
-
-The model generates:
-
-* Infection trend predictions
-* Temporal progression curves
-* Region-wise spread analysis
-
-You can extend evaluation using:
-
-* Accuracy vs baseline
-* ROC-AUC
-* F1-score (recommended for imbalanced data)
-
----
-
-## 🧩 Conventions
-
-### File Naming
-
-#### `/helpers`
-
-* Data-related utilities:
-
-```
-data_<source>.py
-```
+- `COVID_COUNTRY_CONFIGS` (JSON list of country configs)
+- `COVID_DATA_SOURCES` (comma-separated)
+- `COVID_TRAIN_IF_MISSING`
+- `COVID_MODEL_PREFIX`
+- `COVID_MODEL_OUTPUT_DIR`
+- `COVID_HISTORY_WEEKS`
+- `COVID_FORECAST_WEEKS`
+- `COVID_RADIUS`
+- `COVID_LEARNING_RATE`
+- `COVID_NOISE_SCALE`
+- `COVID_EPOCHS`
+- `COVID_RANDOM_SEED`
+- `COVID_SHOW_PROGRESS`
+- `COVID_SAVE_MODEL`
 
 Example:
 
-```
-data_covid.py
-data_mobility.py
-```
-
-#### `/visual_analysis`
-
-* Analysis scripts:
-
-```
-analysis_<purpose>.py
-```
-
----
-
-### Code Practices
-
-* Keep functions modular and reusable
-* Use type hints where possible
-* Document non-trivial logic
-
----
-
-## 🤝 Contribution Guidelines
-
-Before submitting a PR:
-
-1. Update dependencies:
-
 ```bash
-requirements.txt
+export COVID_DATA_SOURCES=mobility,demographics
+export COVID_HISTORY_WEEKS=12
+export COVID_FORECAST_WEEKS=4
+uvicorn server.server:app --host 0.0.0.0 --port 8000
 ```
 
-2. Ensure Docker build works:
+## Project Structure
 
-```bash
-docker build .
+```text
+.
+├── server/                    # FastAPI backend
+├── client/                    # Next.js frontend
+├── helpers/                   # Source-specific data helpers
+├── data/                      # Raw/cache data artifacts
+├── figures/                   # Generated visual outputs
+├── models/                    # Saved model artifacts (.npz + .json)
+├── data_preprocessing.py      # Feature assembly pipeline
+├── model.py                   # Model training/inference logic
+├── requirements.txt
+└── dockerfile
 ```
 
-3. Follow naming conventions
+## Contribution Notes
 
-4. Add clear documentation for:
+Before opening a PR:
 
-   * New features
-   * Data sources
-   * Model changes
+1. Validate backend boots and `/health` returns success.
+2. Run model training path at least once for regression checks.
+3. Keep new data sources isolated in `helpers/data_<source>.py`.
+4. Update documentation for any new source, feature column, or model behavior change.
 
----
+## Additional Reference
 
-## For further details, visit our Google Docs: https://docs.google.com/document/d/1urf0ZvHUWplV77SkfjjVzyYSTYORODY5IiTjLksIypY/edit?usp=sharing
+Google Docs: https://docs.google.com/document/d/1urf0ZvHUWplV77SkfjjVzyYSTYORODY5IiTjLksIypY/edit?usp=sharing
 
-## 🔧 Future Improvements
+## Future Improvements
 
-* Add experiment tracking (e.g., MLflow)
-* Improve model evaluation metrics
-* Add visualization dashboard (Streamlit / React)
-* Hyperparameter tuning pipeline
-* Multi-country comparative analysis
+- Add experiment tracking (MLflow or equivalent)
+- Add automated backtesting across multiple rolling windows
+- Add model versioning and reproducibility manifests
+- Expand evaluation dashboard in frontend
+- Add multi-country comparative training benchmarks
