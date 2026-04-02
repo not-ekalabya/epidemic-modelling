@@ -211,6 +211,8 @@ docker build .
 
 ---
 
+## For further details, visit our Google Docs: https://docs.google.com/document/d/1urf0ZvHUWplV77SkfjjVzyYSTYORODY5IiTjLksIypY/edit?usp=sharing
+
 ## 🔧 Future Improvements
 
 * Add experiment tracking (e.g., MLflow)
