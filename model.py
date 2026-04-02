@@ -28,7 +28,7 @@ class SpatioTemporalCovidRLModel:
     The policy observes:
     - last `history_weeks` of target-cell progression
     - last `history_weeks` of neighborhood progression inside radius `radius`
-    - demographic summaries inside radius `radius`
+    - optional external source features such as mobility or population density
 
     The action is a non-negative future trajectory of confirmed cases over
     `forecast_weeks`. Reward is inverse to the area between predicted and
@@ -46,6 +46,7 @@ class SpatioTemporalCovidRLModel:
         pretrain_epochs: int = 100,
         random_seed: int = 42,
         show_progress: bool = True,
+        data_sources: list[str] | None = None,
     ) -> None:
         if history_weeks < 1:
             raise ValueError("history_weeks must be >= 1")
@@ -63,6 +64,7 @@ class SpatioTemporalCovidRLModel:
         self.pretrain_epochs = pretrain_epochs
         self.random_seed = random_seed
         self.show_progress = show_progress
+        self.data_sources = list(data_sources or ["population_density", "mobility"])
 
         self.weights: np.ndarray | None = None
         self.bias: np.ndarray | None = None
@@ -180,18 +182,23 @@ class SpatioTemporalCovidRLModel:
         self._check_is_fitted()
 
         weekly_df = self._prepare_weekly_dataframe(df)
-        prediction_date = pd.to_datetime(prediction_date).to_period("W").start_time
+        prediction_date = pd.to_datetime(prediction_date).to_period("M").start_time
+        resolved_lat, resolved_lon = self.resolve_cell_coordinates(
+            cell_lat=cell_lat,
+            cell_lon=cell_lon,
+            weekly_df=weekly_df,
+        )
         cell_df = weekly_df[
-            (weekly_df["grid_lat"] == cell_lat)
-            & (weekly_df["grid_lon"] == cell_lon)
+            (weekly_df["grid_lat"] == resolved_lat)
+            & (weekly_df["grid_lon"] == resolved_lon)
         ].sort_values("week").reset_index(drop=True)
         cell_history_df = self._cell_history_frame(cell_df)
-        neighborhood_df = self._neighborhood_frame(weekly_df, cell_lat, cell_lon)
+        neighborhood_df = self._neighborhood_frame(weekly_df, resolved_lat, resolved_lon)
         neighborhood_history_df = self._neighborhood_history_frame(neighborhood_df)
         demographic_features = self._demographic_summary(
             neighborhood_df,
-            cell_lat,
-            cell_lon,
+            resolved_lat,
+            resolved_lon,
         )
         state_vector = self._build_single_state(
             cell_history_df=cell_history_df,
@@ -203,7 +210,7 @@ class SpatioTemporalCovidRLModel:
         trajectory = self._positive_output(x @ self.weights + self.bias)[0]
 
         return {
-            "cell": {"grid_lat": cell_lat, "grid_lon": cell_lon},
+            "cell": {"grid_lat": resolved_lat, "grid_lon": resolved_lon},
             "reference_week": prediction_date,
             "predicted_next_confirmed": float(trajectory[0]),
             "predicted_trajectory": trajectory.tolist(),
@@ -259,11 +266,16 @@ class SpatioTemporalCovidRLModel:
         prediction_date: str | pd.Timestamp,
     ) -> dict[str, object]:
         weekly_df = self._prepare_weekly_dataframe(df)
-        prediction_date = pd.to_datetime(prediction_date).to_period("W").start_time
+        prediction_date = pd.to_datetime(prediction_date).to_period("M").start_time
+        resolved_lat, resolved_lon = self.resolve_cell_coordinates(
+            cell_lat=cell_lat,
+            cell_lon=cell_lon,
+            weekly_df=weekly_df,
+        )
 
         cell_df = weekly_df[
-            (weekly_df["grid_lat"] == cell_lat)
-            & (weekly_df["grid_lon"] == cell_lon)
+            (weekly_df["grid_lat"] == resolved_lat)
+            & (weekly_df["grid_lon"] == resolved_lon)
         ].sort_values("week")
 
         future_df = cell_df[cell_df["week"] > prediction_date].head(self.forecast_weeks)
@@ -278,7 +290,7 @@ class SpatioTemporalCovidRLModel:
             )
 
         return {
-            "cell": {"grid_lat": cell_lat, "grid_lon": cell_lon},
+            "cell": {"grid_lat": resolved_lat, "grid_lon": resolved_lon},
             "reference_week": prediction_date,
             "actual_trajectory": actual.tolist(),
         }
@@ -307,6 +319,7 @@ class SpatioTemporalCovidRLModel:
             "noise_scale": self.noise_scale,
             "epochs": self.epochs,
             "random_seed": self.random_seed,
+            "data_sources": self.data_sources,
             "training_history": self.training_history_,
         }
         with open(f"{model_prefix}.json", "w", encoding="utf-8") as f:
@@ -336,6 +349,7 @@ class SpatioTemporalCovidRLModel:
             epochs=int(metadata["epochs"]),
             random_seed=int(metadata["random_seed"]),
             show_progress=False,
+            data_sources=metadata.get("data_sources"),
         )
 
         weights = np.load(weights_path)
@@ -362,7 +376,7 @@ class SpatioTemporalCovidRLModel:
         if reference_week is None:
             selected_week = metadata["reference_week"].max()
         else:
-            selected_week = pd.to_datetime(reference_week).to_period("W").start_time
+            selected_week = pd.to_datetime(reference_week).to_period("M").start_time
 
         selected_mask = metadata["reference_week"] == selected_week
         if not selected_mask.any():
@@ -389,34 +403,45 @@ class SpatioTemporalCovidRLModel:
             "new_confirmed",
             "new_deceased",
             "new_recovered",
-            "population_density",
-            *MOBILITY_COLUMNS,
         }
+        if "population_density" in self.data_sources:
+            required_columns.add("population_density")
+        if "mobility" in self.data_sources:
+            required_columns.update(MOBILITY_COLUMNS)
         missing = required_columns - set(df.columns)
         if missing:
             raise ValueError(f"Missing required columns: {sorted(missing)}")
 
         weekly_df = df.copy()
         weekly_df["date"] = pd.to_datetime(weekly_df["date"])
-        weekly_df["week"] = weekly_df["date"].dt.to_period("W").dt.start_time
+        weekly_df["week"] = weekly_df["date"].dt.to_period("M").dt.start_time
+        cell_key_columns = self._cell_key_columns(weekly_df)
 
         weekly_df = (
-            weekly_df.groupby(["week", "grid_lat", "grid_lon"], as_index=False)
+            weekly_df.groupby(["week", *cell_key_columns], as_index=False)
             .agg(
                 new_confirmed=("new_confirmed", "sum"),
                 new_deceased=("new_deceased", "sum"),
                 new_recovered=("new_recovered", "sum"),
-                population_density=("population_density", "max"),
-                **{
-                    column: (column, "mean")
-                    for column in MOBILITY_COLUMNS
-                },
+                **(
+                    {"population_density": ("population_density", "max")}
+                    if "population_density" in self.data_sources
+                    else {}
+                ),
+                **(
+                    {
+                        column: (column, "mean")
+                        for column in MOBILITY_COLUMNS
+                    }
+                    if "mobility" in self.data_sources
+                    else {}
+                ),
             )
-            .sort_values(["grid_lat", "grid_lon", "week"])
+            .sort_values([*cell_key_columns, "week"])
         )
 
         weekly_df["cumulative_confirmed"] = (
-            weekly_df.groupby(["grid_lat", "grid_lon"])["new_confirmed"].cumsum()
+            weekly_df.groupby(cell_key_columns)["new_confirmed"].cumsum()
         )
 
         unique_lats = np.sort(weekly_df["grid_lat"].unique())
@@ -427,15 +452,68 @@ class SpatioTemporalCovidRLModel:
 
         return weekly_df
 
+    def resolve_cell_coordinates(
+        self,
+        cell_lat: float,
+        cell_lon: float,
+        df: pd.DataFrame | None = None,
+        weekly_df: pd.DataFrame | None = None,
+    ) -> tuple[float, float]:
+        if weekly_df is None:
+            if df is None:
+                raise ValueError("Either df or weekly_df must be provided.")
+            weekly_df = self._prepare_weekly_dataframe(df)
+
+        available_cells = weekly_df[["grid_lat", "grid_lon"]].drop_duplicates()
+
+        exact_match = available_cells[
+            (available_cells["grid_lat"] == cell_lat)
+            & (available_cells["grid_lon"] == cell_lon)
+        ]
+        if not exact_match.empty:
+            row = exact_match.iloc[0]
+            return float(row["grid_lat"]), float(row["grid_lon"])
+
+        grid_spacing = float(self.grid_spacing_ or 1.0)
+        resolved_lat = float(np.floor(cell_lat / grid_spacing) * grid_spacing)
+        resolved_lon = float(np.floor(cell_lon / grid_spacing) * grid_spacing)
+
+        snapped_match = available_cells[
+            np.isclose(available_cells["grid_lat"], resolved_lat)
+            & np.isclose(available_cells["grid_lon"], resolved_lon)
+        ]
+        if not snapped_match.empty:
+            row = snapped_match.iloc[0]
+            return float(row["grid_lat"]), float(row["grid_lon"])
+
+        cell_coordinates = available_cells.to_numpy(dtype=float)
+        distances = np.sqrt(
+            (cell_coordinates[:, 0] - cell_lat) ** 2
+            + (cell_coordinates[:, 1] - cell_lon) ** 2
+        )
+        nearest_index = int(np.argmin(distances))
+        row = available_cells.iloc[nearest_index]
+        return float(row["grid_lat"]), float(row["grid_lon"])
+
+    @staticmethod
+    def _cell_key_columns(df: pd.DataFrame) -> list[str]:
+        key_columns = ["grid_lat", "grid_lon"]
+        for column in ("country_iso2", "country_iso3"):
+            if column in df.columns:
+                key_columns.insert(0, column)
+        return key_columns
+
     def _build_episode_batch(self, weekly_df: pd.DataFrame) -> EpisodeBatch:
         rows: list[np.ndarray] = []
         targets: list[np.ndarray] = []
         metadata_rows: list[dict[str, object]] = []
+        cell_key_columns = self._cell_key_columns(weekly_df)
+        coordinate_columns = ["grid_lat", "grid_lon"]
 
-        cell_groups = list(weekly_df.groupby(["grid_lat", "grid_lon"], sort=False))
+        cell_groups = list(weekly_df.groupby(cell_key_columns, sort=False))
         cell_frames = {
-            (float(cell_lat), float(cell_lon)): cell_df.sort_values("week").reset_index(drop=True)
-            for (cell_lat, cell_lon), cell_df in cell_groups
+            self._normalize_cell_group_key(cell_key): cell_df.sort_values("week").reset_index(drop=True)
+            for cell_key, cell_df in cell_groups
         }
         neighborhood_map = self._neighborhood_coordinate_map(
             list(cell_frames.keys())
@@ -449,15 +527,17 @@ class SpatioTemporalCovidRLModel:
                 desc="Building episodes",
             )
 
-        for (cell_lat, cell_lon), cell_df in group_iterator:
+        for cell_key, cell_df in group_iterator:
             if len(cell_df) < self.history_weeks + self.forecast_weeks:
                 continue
 
+            cell_lat = float(cell_df["grid_lat"].iloc[0])
+            cell_lon = float(cell_df["grid_lon"].iloc[0])
             cell_history_df = self._cell_history_frame(cell_df)
             neighborhood_df = pd.concat(
                 [
                     cell_frames[neighbor_coordinate]
-                    for neighbor_coordinate in neighborhood_map[(cell_lat, cell_lon)]
+                    for neighbor_coordinate in neighborhood_map[cell_key]
                 ],
                 ignore_index=True,
             )
@@ -487,6 +567,11 @@ class SpatioTemporalCovidRLModel:
                         "grid_lat": cell_lat,
                         "grid_lon": cell_lon,
                         "reference_week": reference_week,
+                        **{
+                            column: cell_df[column].iloc[0]
+                            for column in cell_key_columns
+                            if column not in coordinate_columns
+                        },
                     }
                 )
 
@@ -513,7 +598,7 @@ class SpatioTemporalCovidRLModel:
         weeks = pd.date_range(
             end=reference_week,
             periods=self.history_weeks,
-            freq="W-MON",
+            freq="MS",
         )
         weeks = pd.to_datetime(weeks).normalize()
 
@@ -528,6 +613,7 @@ class SpatioTemporalCovidRLModel:
         ).astype(float)
 
     def _cell_history_frame(self, cell_df: pd.DataFrame) -> pd.DataFrame:
+        mobility_columns = MOBILITY_COLUMNS if "mobility" in self.data_sources else []
         return cell_df[
             [
                 "week",
@@ -535,7 +621,7 @@ class SpatioTemporalCovidRLModel:
                 "new_deceased",
                 "new_recovered",
                 "cumulative_confirmed",
-                *MOBILITY_COLUMNS,
+                *mobility_columns,
             ]
         ].set_index("week")
 
@@ -565,32 +651,61 @@ class SpatioTemporalCovidRLModel:
 
     def _neighborhood_coordinate_map(
         self,
-        cell_coordinates: list[tuple[float, float]],
-    ) -> dict[tuple[float, float], list[tuple[float, float]]]:
-        if not cell_coordinates:
+        cell_keys: list[tuple[object, ...]],
+    ) -> dict[tuple[object, ...], list[tuple[object, ...]]]:
+        if not cell_keys:
             return {}
 
-        coordinates = np.asarray(cell_coordinates, dtype=float)
+        coordinate_values = np.asarray(
+            [[float(cell_key[-2]), float(cell_key[-1])] for cell_key in cell_keys],
+            dtype=float,
+        )
         radius_in_degrees = self.radius * float(self.grid_spacing_ or 1.0)
-        mapping: dict[tuple[float, float], list[tuple[float, float]]] = {}
+        mapping: dict[tuple[object, ...], list[tuple[object, ...]]] = {}
 
-        for idx, (cell_lat, cell_lon) in enumerate(coordinates):
+        for idx, cell_key in enumerate(cell_keys):
+            same_partition_indices = [
+                index
+                for index, other_key in enumerate(cell_keys)
+                if other_key[:-2] == cell_key[:-2]
+            ]
+            partition_coordinates = coordinate_values[same_partition_indices]
+            cell_lat, cell_lon = coordinate_values[idx]
             distances = np.sqrt(
-                (coordinates[:, 0] - cell_lat) ** 2
-                + (coordinates[:, 1] - cell_lon) ** 2
+                (partition_coordinates[:, 0] - cell_lat) ** 2
+                + (partition_coordinates[:, 1] - cell_lon) ** 2
             )
             neighbor_indices = np.flatnonzero(distances <= radius_in_degrees)
-            mapping[cell_coordinates[idx]] = [
-                cell_coordinates[neighbor_index]
+            mapping[cell_key] = [
+                cell_keys[same_partition_indices[neighbor_index]]
                 for neighbor_index in neighbor_indices
             ]
 
         return mapping
 
+    @staticmethod
+    def _normalize_cell_group_key(cell_key: object) -> tuple[object, ...]:
+        if isinstance(cell_key, tuple):
+            normalized = list(cell_key)
+        else:
+            normalized = [cell_key]
+
+        normalized[-2] = float(normalized[-2])
+        normalized[-1] = float(normalized[-1])
+        return tuple(normalized)
+
     def _neighborhood_history_frame(
         self,
         neighborhood_df: pd.DataFrame,
     ) -> pd.DataFrame:
+        mobility_aggregations = (
+            {
+                f"{column}_mean": (column, "mean")
+                for column in MOBILITY_COLUMNS
+            }
+            if "mobility" in self.data_sources
+            else {}
+        )
         return (
             neighborhood_df.groupby("week", as_index=True)
             .agg(
@@ -599,10 +714,7 @@ class SpatioTemporalCovidRLModel:
                 cumulative_confirmed_sum=("cumulative_confirmed", "sum"),
                 new_deceased_sum=("new_deceased", "sum"),
                 new_recovered_sum=("new_recovered", "sum"),
-                **{
-                    f"{column}_mean": (column, "mean")
-                    for column in MOBILITY_COLUMNS
-                },
+                **mobility_aggregations,
             )
         )
 
@@ -623,6 +735,9 @@ class SpatioTemporalCovidRLModel:
         cell_lat: float,
         cell_lon: float,
     ) -> np.ndarray:
+        if "population_density" not in self.data_sources:
+            return np.empty(0, dtype=float)
+
         cell_density = neighborhood_df[
             (neighborhood_df["grid_lat"] == cell_lat)
             & (neighborhood_df["grid_lon"] == cell_lon)
@@ -696,6 +811,7 @@ def train_rl_covid_model(
     epochs: int = 250,
     random_seed: int = 42,
     show_progress: bool = True,
+    data_sources: list[str] | None = None,
 ) -> SpatioTemporalCovidRLModel:
     model = SpatioTemporalCovidRLModel(
         history_weeks=history_weeks,
@@ -706,12 +822,14 @@ def train_rl_covid_model(
         epochs=epochs,
         random_seed=random_seed,
         show_progress=show_progress,
+        data_sources=data_sources,
     )
     return model.fit(df)
 
 
 def load_multi_country_dataset(
     country_configs: list[dict[str, object]],
+    data_sources: list[str] | None = None,
 ) -> pd.DataFrame:
     datasets: list[pd.DataFrame] = []
 
@@ -720,6 +838,7 @@ def load_multi_country_dataset(
             country_iso2=str(config["country_iso2"]),
             country_iso3=str(config["country_iso3"]),
             grid_km=int(config.get("grid_km", 20)),
+            data_sources=data_sources,
         ).copy()
         dataset["country_iso2"] = str(config["country_iso2"])
         dataset["country_iso3"] = str(config["country_iso3"])
@@ -755,8 +874,8 @@ def visualize_prediction_progress(
     bar_width = 0.35
     axes[0].bar(horizon - bar_width / 2, predicted, width=bar_width, color="#c0392b", label="Predicted")
     axes[0].bar(horizon + bar_width / 2, actual, width=bar_width, color="#1f618d", label="Actual")
-    axes[0].set_title("Weekly confirmed cases")
-    axes[0].set_xlabel("Forecast week")
+    axes[0].set_title("Monthly confirmed cases")
+    axes[0].set_xlabel("Forecast month")
     axes[0].set_ylabel("Confirmed cases")
     axes[0].set_xticks(horizon)
     axes[0].set_ylim(0, max(float(predicted.max(initial=0.0)), float(actual.max(initial=0.0)), 1.0) * 1.15)
@@ -770,7 +889,7 @@ def visualize_prediction_progress(
     axes[1].plot(horizon, actual_curve, marker="o", linewidth=2.5, color="#1f618d", label="Actual cumulative")
     axes[1].fill_between(horizon, predicted_curve, actual_curve, color="#d4ac0d", alpha=0.2, label="Area error")
     axes[1].set_title("Cumulative progression")
-    axes[1].set_xlabel("Forecast week")
+    axes[1].set_xlabel("Forecast month")
     axes[1].set_ylabel("Cumulative confirmed cases")
     axes[1].set_xticks(horizon)
     axes[1].set_ylim(0, max(float(predicted_curve.max(initial=0.0)), float(actual_curve.max(initial=0.0)), 1.0) * 1.15)

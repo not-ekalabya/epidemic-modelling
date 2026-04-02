@@ -13,25 +13,22 @@ from pydantic import BaseModel, Field
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
+from helpers.data_covid import get_country_total_covid_data
 from model import SpatioTemporalCovidRLModel, load_multi_country_dataset, train_rl_covid_model
+
+COVID_DATA_SOURCES = ["mobility"]
 
 
 DEFAULT_COUNTRY_CONFIGS = [
     {"country_iso2": "BD", "country_iso3": "BGD", "grid_km": 20},
-    {"country_iso2": "ID", "country_iso3": "IDN", "grid_km": 20},
-    {"country_iso2": "PH", "country_iso3": "PHL", "grid_km": 20},
-    {"country_iso2": "TH", "country_iso3": "THA", "grid_km": 20},
-    {"country_iso2": "VN", "country_iso3": "VNM", "grid_km": 20},
 ]
 
 
 class PredictionRequest(BaseModel):
-    cell_lat: float = Field(..., description="Grid latitude of the cell.")
-    cell_lon: float = Field(..., description="Grid longitude of the cell.")
-    prediction_date: str = Field(..., description="ISO date aligned to a prediction week.")
+    prediction_date: str = Field(..., description="ISO date aligned to a prediction month.")
     include_actual: bool = Field(
         default=False,
-        description="Include the actual future trajectory if available in the dataset.",
+        description="Include the actual future country trajectory if available in the dataset.",
     )
 
 
@@ -40,7 +37,9 @@ class ServerState:
         self._lock = Lock()
         self._dataset: pd.DataFrame | None = None
         self._model: SpatioTemporalCovidRLModel | None = None
+        self._country_actuals: pd.DataFrame | None = None
         self._country_configs = self._read_country_configs()
+        self._data_sources = self._read_data_sources()
         self._train_if_missing = self._read_bool_env("COVID_TRAIN_IF_MISSING", default=True)
         self._model_prefix = os.getenv("COVID_MODEL_PREFIX")
         self._model_output_dir = os.getenv("COVID_MODEL_OUTPUT_DIR", "models")
@@ -53,6 +52,7 @@ class ServerState:
             "epochs": int(os.getenv("COVID_EPOCHS", "50")),
             "random_seed": int(os.getenv("COVID_RANDOM_SEED", "42")),
             "show_progress": self._read_bool_env("COVID_SHOW_PROGRESS", default=False),
+            "data_sources": self._data_sources,
         }
 
     def get_dataset(self) -> pd.DataFrame:
@@ -67,21 +67,39 @@ class ServerState:
             raise RuntimeError("Model failed to initialize.")
         return self._model
 
+    def get_country_actuals(self) -> pd.DataFrame:
+        self.ensure_ready()
+        if self._country_actuals is None:
+            raise RuntimeError("Country actuals failed to initialize.")
+        return self._country_actuals
+
     def ensure_ready(self) -> None:
         if self._dataset is not None and self._model is not None:
             return
 
         with self._lock:
             if self._dataset is None:
-                self._dataset = load_multi_country_dataset(self._country_configs)
+                self._dataset = load_multi_country_dataset(
+                    self._country_configs,
+                    data_sources=self._data_sources,
+                )
+                self._country_actuals = self._load_country_actuals()
 
             if self._model is not None:
                 return
 
             model_prefix = self._resolve_model_prefix()
             if model_prefix is not None:
-                self._model = SpatioTemporalCovidRLModel.load(model_prefix)
-                return
+                loaded_model = SpatioTemporalCovidRLModel.load(model_prefix)
+                if loaded_model.data_sources == self._data_sources:
+                    self._model = loaded_model
+                    return
+                if not self._train_if_missing:
+                    raise ValueError(
+                        "Saved model data_sources "
+                        f"{loaded_model.data_sources} do not match server data_sources "
+                        f"{self._data_sources}. Retraining is disabled."
+                    )
 
             if not self._train_if_missing:
                 raise FileNotFoundError(
@@ -98,12 +116,31 @@ class ServerState:
                 model_prefix = self._model.save(output_dir=self._model_output_dir)
                 self._model_prefix = model_prefix
 
+    def country_actual_trajectory(
+        self,
+        prediction_date: str,
+        forecast_weeks: int,
+    ) -> dict[str, Any]:
+        country_actuals = self.get_country_actuals().copy()
+        reference_week = pd.to_datetime(prediction_date).to_period("M").start_time
+        future_df = country_actuals[country_actuals["week"] > reference_week].head(forecast_weeks)
+        actual = future_df["new_confirmed"].to_numpy(dtype=float)
+
+        if len(actual) < forecast_weeks:
+            actual = pd.Series(actual, dtype=float).reindex(range(forecast_weeks), fill_value=0.0).to_numpy(dtype=float)
+
+        return {
+            "reference_week": reference_week,
+            "actual_trajectory": actual.tolist(),
+        }
+
     def metadata(self) -> dict[str, Any]:
         dataset = self.get_dataset()
         model = self.get_model()
         weeks = pd.to_datetime(dataset["date"]).sort_values()
         return {
             "country_configs": self._country_configs,
+            "data_sources": self._data_sources,
             "model_prefix": self._model_prefix,
             "train_if_missing": self._train_if_missing,
             "training_kwargs": self._training_kwargs,
@@ -116,6 +153,24 @@ class ServerState:
             "forecast_weeks": model.forecast_weeks,
             "history_weeks": model.history_weeks,
         }
+
+    def _load_country_actuals(self) -> pd.DataFrame:
+        country_frames: list[pd.DataFrame] = []
+
+        for config in self._country_configs:
+            country_iso2 = str(config["country_iso2"])
+            country_df = get_country_total_covid_data(country_iso2).copy()
+            country_df["date"] = pd.to_datetime(country_df["date"])
+            country_df["week"] = country_df["date"].dt.to_period("M").dt.start_time
+            country_frames.append(country_df)
+
+        combined = pd.concat(country_frames, ignore_index=True)
+        return (
+            combined.groupby("week", as_index=False)
+            .agg(new_confirmed=("new_confirmed", "sum"))
+            .sort_values("week")
+            .reset_index(drop=True)
+        )
 
     def _resolve_model_prefix(self) -> str | None:
         if self._model_prefix:
@@ -156,6 +211,21 @@ class ServerState:
             raise ValueError("COVID_COUNTRY_CONFIGS must be a non-empty JSON list.")
         return configs
 
+    @staticmethod
+    def _read_data_sources() -> list[str]:
+        raw_sources = os.getenv("COVID_DATA_SOURCES")
+        if not raw_sources:
+            return COVID_DATA_SOURCES
+
+        data_sources = [
+            source.strip()
+            for source in raw_sources.split(",")
+            if source.strip()
+        ]
+        if not data_sources:
+            raise ValueError("COVID_DATA_SOURCES must contain at least one source.")
+        return data_sources
+
 
 app = FastAPI(
     title="CodeCure Prediction API",
@@ -190,33 +260,23 @@ def predict(request: PredictionRequest) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    matching_cells = dataset[
-        (dataset["grid_lat"] == request.cell_lat)
-        & (dataset["grid_lon"] == request.cell_lon)
-    ]
-    if matching_cells.empty:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"Cell ({request.cell_lat}, {request.cell_lon}) not found in the loaded dataset."
-            ),
-        )
-
     try:
+        country_report = model.country_progression_report(
+            df=dataset,
+            reference_week=request.prediction_date,
+        )
         response: dict[str, Any] = {
-            "prediction": model.predict(
-                df=dataset,
-                cell_lat=request.cell_lat,
-                cell_lon=request.cell_lon,
-                prediction_date=request.prediction_date,
-            )
+            "prediction": {
+                "reference_week": country_report["reference_week"],
+                "predicted_next_confirmed": float(country_report["predicted_trajectory"][0]),
+                "predicted_trajectory": country_report["predicted_trajectory"],
+                "cell_count": country_report["cell_count"],
+            }
         }
         if request.include_actual:
-            response["actual"] = model.actual_trajectory(
-                df=dataset,
-                cell_lat=request.cell_lat,
-                cell_lon=request.cell_lon,
+            response["actual"] = state.country_actual_trajectory(
                 prediction_date=request.prediction_date,
+                forecast_weeks=model.forecast_weeks,
             )
         return response
     except ValueError as exc:

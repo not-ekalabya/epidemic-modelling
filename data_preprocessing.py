@@ -14,60 +14,61 @@ from helpers.data_population_density import get_country_population_density
 def get_spatiotemporal_covid_dataset(
     country_iso2: str,
     country_iso3: str,
-    grid_km: int = 1
+    grid_km: int = 1,
+    data_sources: list[str] | None = None,
 ) -> pd.DataFrame:
+    selected_sources = set(data_sources or ["population_density", "mobility"])
 
-    print("Loading population density...")
-    pop_df = get_country_population_density(country_iso3)
+    pop_grid: pd.DataFrame | None = None
+    if "population_density" in selected_sources:
+        print("Loading population density...")
+        pop_df = get_country_population_density(country_iso3)
 
     print("Loading covid data...")
     covid_df = get_covid_data(country_iso2)
 
-    print("Loading mobility data...")
-    mobility_df = get_mobility_data(country_iso2)
+    mobility_grid: pd.DataFrame | None = None
+    if "mobility" in selected_sources:
+        print("Loading mobility data...")
+        mobility_df = get_mobility_data(country_iso2)
 
     grid_size = grid_km / 111.0   # km → degrees
 
-    pop_df = pop_df.copy()
-
-    pop_df["grid_lat"] = (
-        np.floor(pop_df["latitude"] / grid_size) * grid_size
-    )
-
-    pop_df["grid_lon"] = (
-        np.floor(pop_df["longitude"] / grid_size) * grid_size
-    )
-
-    # aggregate population into grid
-    pop_grid = pop_df.groupby(
-        ["grid_lat", "grid_lon"]
-    ).agg(
-        population_density=("population_density", "sum")
-    ).reset_index()
+    if "population_density" in selected_sources:
+        pop_df = pop_df.copy()
+        pop_df["grid_lat"] = (
+            np.floor(pop_df["latitude"] / grid_size) * grid_size
+        )
+        pop_df["grid_lon"] = (
+            np.floor(pop_df["longitude"] / grid_size) * grid_size
+        )
+        pop_grid = pop_df.groupby(
+            ["grid_lat", "grid_lon"]
+        ).agg(
+            population_density=("population_density", "sum")
+        ).reset_index()
 
 
     # --------------------------------
     # Prepare temporal dataset
     # --------------------------------
 
-    mobility_df = mobility_df.copy()
-
-    mobility_df["grid_lat"] = (
-        np.floor(mobility_df["latitude"] / grid_size) * grid_size
-    )
-
-    mobility_df["grid_lon"] = (
-        np.floor(mobility_df["longitude"] / grid_size) * grid_size
-    )
-
-    mobility_grid = mobility_df.groupby(
-        ["date", "grid_lat", "grid_lon"]
-    ).agg(
-        **{
-            column: (column, "mean")
-            for column in MOBILITY_COLUMNS
-        }
-    ).reset_index()
+    if "mobility" in selected_sources:
+        mobility_df = mobility_df.copy()
+        mobility_df["grid_lat"] = (
+            np.floor(mobility_df["latitude"] / grid_size) * grid_size
+        )
+        mobility_df["grid_lon"] = (
+            np.floor(mobility_df["longitude"] / grid_size) * grid_size
+        )
+        mobility_grid = mobility_df.groupby(
+            ["date", "grid_lat", "grid_lon"]
+        ).agg(
+            **{
+                column: (column, "mean")
+                for column in MOBILITY_COLUMNS
+            }
+        ).reset_index()
 
     covid_df = covid_df.copy()
 
@@ -90,27 +91,31 @@ def get_spatiotemporal_covid_dataset(
         new_recovered=("new_recovered", "sum")
     ).reset_index()
 
-    print("Merging population, mobility, and covid grids...")
+    print("Merging selected data sources into covid grids...")
 
-    final_df = covid_grid.merge(
-        pop_grid,
-        on=["grid_lat", "grid_lon"],
-        how="left"
-    )
+    final_df = covid_grid.copy()
 
-    final_df = final_df.merge(
-        mobility_grid,
-        on=["date", "grid_lat", "grid_lon"],
-        how="left"
-    )
+    if pop_grid is not None:
+        final_df = final_df.merge(
+            pop_grid,
+            on=["grid_lat", "grid_lon"],
+            how="left"
+        )
+        final_df["population_density"] = final_df[
+            "population_density"
+        ].fillna(0)
 
-    final_df["population_density"] = final_df[
-        "population_density"
-    ].fillna(0)
+    if mobility_grid is not None:
+        final_df = final_df.merge(
+            mobility_grid,
+            on=["date", "grid_lat", "grid_lon"],
+            how="left"
+        )
+        for column in MOBILITY_COLUMNS:
+            final_df[column] = final_df[column].fillna(0.0)
 
-    for column in MOBILITY_COLUMNS:
-        final_df[column] = final_df[column].fillna(0.0)
-
+    final_df["country_iso2"] = country_iso2
+    final_df["country_iso3"] = country_iso3
 
     return final_df
 

@@ -6,11 +6,19 @@
 
 ```pip install -r requirements.txt```
 
+Start Fast-API server
+
+```uvicorn server.server:app --host 0.0.0.0 --port 8000```
+
+### Train model manually
+
 ```python preprocessing.py```
 
 ```python model.py```
 
 Modify ```COUNTRY_ISO2 = "BD" ``` and ```COUNTRY_ISO3 = "BGD" ``` with ISO-2 and ISO-3 country codes at ```main.py``` to access population densities of different countries.
+
+
 
 --- TODO (@Ujan): Add more detailed docs ---
 

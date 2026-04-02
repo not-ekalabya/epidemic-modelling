@@ -109,7 +109,30 @@ def get_country_location_lookup(country: str) -> pd.DataFrame:
     return lookup_df
 
 
+def get_leaf_location_lookup(country: str) -> pd.DataFrame:
+    lookup_df = get_country_location_lookup(country)
+    location_keys = lookup_df["location_key"].dropna().astype(str).tolist()
+
+    leaf_keys: list[str] = []
+    for location_key in location_keys:
+        child_prefix = f"{location_key}_"
+        has_children = any(
+            other_key.startswith(child_prefix)
+            for other_key in location_keys
+            if other_key != location_key
+        )
+        if not has_children:
+            leaf_keys.append(location_key)
+
+    if not leaf_keys:
+        return lookup_df
+
+    return lookup_df[lookup_df["location_key"].isin(leaf_keys)].copy()
+
+
 def get_covid_data(country: str) -> pd.DataFrame:
+    location_lookup = get_leaf_location_lookup(country)
+    expected_location_keys = set(location_lookup["location_key"].tolist())
 
     # ------------------------
     # Check cached dataset
@@ -126,9 +149,11 @@ def get_covid_data(country: str) -> pd.DataFrame:
         df_country = df_existing[
             df_existing["location_key"].fillna("").str.startswith(country)
         ]
+        cached_location_keys = set(df_country["location_key"].dropna().astype(str).unique())
+        has_expected_keys = cached_location_keys == expected_location_keys
 
         # If already computed → return cached
-        if len(df_country) > 0 and len(missing_columns) == 0:
+        if len(df_country) > 0 and len(missing_columns) == 0 and has_expected_keys:
 
             print(f"Using cached coordinates for {country}")
             return df_country
@@ -143,7 +168,6 @@ def get_covid_data(country: str) -> pd.DataFrame:
 
     print("Loading datasets...")
 
-    location_lookup = get_country_location_lookup(country)
     location_keys = set(location_lookup["location_key"].tolist())
 
     df_raw = pd.read_csv(
@@ -210,6 +234,27 @@ def get_covid_data(country: str) -> pd.DataFrame:
     )
 
     return df
+
+
+def get_country_total_covid_data(country: str) -> pd.DataFrame:
+    download_file(EPIDEMIOLOGY_URL, RAW_DATA_PATH)
+
+    df_raw = pd.read_csv(
+        RAW_DATA_PATH,
+        usecols=[
+            "date",
+            "location_key",
+            "new_confirmed",
+            "new_deceased",
+            "new_recovered",
+        ],
+    )
+
+    df_country = df_raw[df_raw["location_key"] == country].copy()
+    if len(df_country) == 0:
+        raise ValueError(f"No country-level COVID data found for {country}.")
+
+    return df_country
 
 if __name__ == "__main__":
     

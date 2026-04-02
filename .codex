@@ -16,15 +16,36 @@ Do not return mixed COVID + mobility rows from one helper.
 4. Process each source independently in `data_preprocessing.py`.
 Match the `population_density` workflow:
 load the source, compute `grid_lat` and `grid_lon`, aggregate into a source-specific grid dataframe, then merge that dataframe into the final dataset.
+Do not make a source mandatory unless the repository explicitly requires it.
+New sources must be optional through the `data_sources` parameter on:
+`data_preprocessing.py:get_spatiotemporal_covid_dataset()`
+`model.py:load_multi_country_dataset()`
+`model.py:train_rl_covid_model()`
+`model.py:SpatioTemporalCovidRLModel()`
 
-5. Use aggregation that matches the metric semantics.
+5. Keep source selection end-to-end consistent.
+If a source is added to preprocessing, update the model so feature construction is conditional on whether that source is enabled.
+Do not require a column in `model.py` unless the matching source is present in `data_sources`.
+Persist `data_sources` in saved model metadata so reloaded models know which features they were trained on.
+
+6. Wire server defaults intentionally.
+If a new source is intended for inference, expose it through `server/server.py` via `COVID_DATA_SOURCES`.
+Do not silently load a new source in the server by default unless that default is deliberate and documented.
+The current server default is mobility-only, so new sources must not assume population density is present.
+
+7. Use aggregation that matches the metric semantics.
 Use `sum` for additive quantities such as cases.
 Use `sum` for gridded population density in this repository because the current workflow treats it as a cell total.
 Use `mean` for mobility indicators unless a different domain rule is required.
 
-6. Update downstream consumers explicitly.
+8. Update downstream consumers explicitly.
 If a new metric is used by training, validation, or visualization, add the required columns and aggregation rules in those modules.
 
-7. Update docs with every new source.
+9. Preserve geography semantics when adding sources.
+Do not mix country-level and subnational rows into the same spatial target unless that hierarchy handling is explicit.
+If a source uses location hierarchies, choose a single level or the deepest available level and document the fallback rule.
+If the dataset is multi-country, ensure grouping keys preserve country identity so cells from different countries cannot collide.
+
+10. Update docs with every new source.
 Add a short source note to `README.md`.
 Add workflow guidance here in `.codex` if the repository procedure changes.
