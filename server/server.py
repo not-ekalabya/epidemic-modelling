@@ -32,6 +32,12 @@ class PredictionRequest(BaseModel):
     )
 
 
+class CountryConfigRequest(BaseModel):
+    country_iso2: str = Field(..., min_length=2, max_length=2, description="ISO2 country code.")
+    country_iso3: str = Field(..., min_length=3, max_length=3, description="ISO3 country code.")
+    grid_km: int = Field(default=20, ge=1, le=200, description="Grid resolution in kilometers.")
+
+
 class ServerState:
     def __init__(self) -> None:
         self._lock = Lock()
@@ -54,6 +60,7 @@ class ServerState:
             "show_progress": self._read_bool_env("COVID_SHOW_PROGRESS", default=False),
             "data_sources": self._data_sources,
         }
+        self._allow_latest_model_discovery = True
 
     def get_dataset(self) -> pd.DataFrame:
         self.ensure_ready()
@@ -154,6 +161,26 @@ class ServerState:
             "history_weeks": model.history_weeks,
         }
 
+    def update_country_config(
+        self,
+        country_iso2: str,
+        country_iso3: str,
+        grid_km: int,
+    ) -> None:
+        next_config = [{
+            "country_iso2": country_iso2,
+            "country_iso3": country_iso3,
+            "grid_km": grid_km,
+        }]
+
+        with self._lock:
+            self._country_configs = next_config
+            self._dataset = None
+            self._model = None
+            self._country_actuals = None
+            self._model_prefix = None
+            self._allow_latest_model_discovery = False
+
     def _load_country_actuals(self) -> pd.DataFrame:
         country_frames: list[pd.DataFrame] = []
 
@@ -175,6 +202,9 @@ class ServerState:
     def _resolve_model_prefix(self) -> str | None:
         if self._model_prefix:
             return self._strip_model_extension(self._model_prefix)
+
+        if not self._allow_latest_model_discovery:
+            return None
 
         model_dir = Path(self._model_output_dir)
         if not model_dir.exists():
@@ -250,6 +280,43 @@ def metadata() -> dict[str, Any]:
         return state.metadata()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/config/country")
+def configure_country(request: CountryConfigRequest) -> dict[str, Any]:
+    country_iso2 = request.country_iso2.strip().upper()
+    country_iso3 = request.country_iso3.strip().upper()
+
+    if not country_iso2.isalpha() or len(country_iso2) != 2:
+        raise HTTPException(status_code=400, detail="country_iso2 must be a 2-letter ISO code.")
+    if not country_iso3.isalpha() or len(country_iso3) != 3:
+        raise HTTPException(status_code=400, detail="country_iso3 must be a 3-letter ISO code.")
+
+    previous_configs = state._country_configs.copy()
+    previous_dataset = state._dataset
+    previous_model = state._model
+    previous_actuals = state._country_actuals
+    previous_prefix = state._model_prefix
+    previous_discovery = state._allow_latest_model_discovery
+
+    state.update_country_config(
+        country_iso2=country_iso2,
+        country_iso3=country_iso3,
+        grid_km=int(request.grid_km),
+    )
+
+    try:
+        state.ensure_ready()
+        return {"status": "ok", "metadata": state.metadata()}
+    except Exception as exc:
+        with state._lock:
+            state._country_configs = previous_configs
+            state._dataset = previous_dataset
+            state._model = previous_model
+            state._country_actuals = previous_actuals
+            state._model_prefix = previous_prefix
+            state._allow_latest_model_discovery = previous_discovery
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/predict")

@@ -45,6 +45,12 @@ type MetadataResponse = {
   }>;
 };
 
+type ConfigureCountryResponse = {
+  status?: string;
+  metadata?: MetadataResponse;
+  detail?: string;
+};
+
 const defaultValues = {
   predictionDate: "2021-08-02",
   includeActual: true,
@@ -53,8 +59,13 @@ const defaultValues = {
 export default function Home() {
   const [predictionDate, setPredictionDate] = useState(defaultValues.predictionDate);
   const [includeActual, setIncludeActual] = useState(defaultValues.includeActual);
+  const [countryIso2, setCountryIso2] = useState("BD");
+  const [countryIso3, setCountryIso3] = useState("BGD");
+  const [gridKm, setGridKm] = useState("20");
   const [isLoading, setIsLoading] = useState(false);
+  const [isConfiguringCountry, setIsConfiguringCountry] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [countryConfigError, setCountryConfigError] = useState<string | null>(null);
   const [result, setResult] = useState<PredictionResponse | null>(null);
   const [metadata, setMetadata] = useState<MetadataResponse | null>(null);
   const [selectedCellIndex, setSelectedCellIndex] = useState<number>(0);
@@ -73,6 +84,12 @@ export default function Home() {
         const payload = (await response.json()) as MetadataResponse;
         if (active) {
           setMetadata(payload);
+          const firstCountry = payload.country_configs?.[0];
+          if (firstCountry) {
+            setCountryIso2(firstCountry.country_iso2);
+            setCountryIso3(firstCountry.country_iso3);
+            setGridKm(firstCountry.grid_km ? String(firstCountry.grid_km) : "20");
+          }
         }
       } catch {
         // Ignore metadata loading failures in the UI.
@@ -119,6 +136,56 @@ export default function Home() {
       setError("Could not reach the prediction server.");
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function handleConfigureCountry(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsConfiguringCountry(true);
+    setCountryConfigError(null);
+    setError(null);
+
+    const parsedGridKm = Number.parseInt(gridKm, 10);
+    if (!Number.isFinite(parsedGridKm) || parsedGridKm < 1 || parsedGridKm > 200) {
+      setCountryConfigError("Grid size must be between 1 and 200 km.");
+      setIsConfiguringCountry(false);
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/configure-country", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          country_iso2: countryIso2,
+          country_iso3: countryIso3,
+          grid_km: parsedGridKm,
+        }),
+      });
+
+      const payload = (await response.json()) as ConfigureCountryResponse;
+
+      if (!response.ok || payload.status !== "ok" || !payload.metadata) {
+        setCountryConfigError(payload.detail ?? "Could not update country settings.");
+        return;
+      }
+
+      setMetadata(payload.metadata);
+      const firstCountry = payload.metadata.country_configs?.[0];
+      if (firstCountry) {
+        setCountryIso2(firstCountry.country_iso2);
+        setCountryIso3(firstCountry.country_iso3);
+        setGridKm(firstCountry.grid_km ? String(firstCountry.grid_km) : "20");
+      }
+      setResult(null);
+      setSelectedCellIndex(0);
+      setSortMode("predicted");
+    } catch {
+      setCountryConfigError("Could not reach the prediction server.");
+    } finally {
+      setIsConfiguringCountry(false);
     }
   }
 
@@ -209,6 +276,68 @@ export default function Home() {
               <button className="dashboard-button w-full" disabled={isLoading} type="submit">
                 {isLoading ? "Running prediction..." : "Predict now"}
               </button>
+            </form>
+
+            <form className="space-y-4 rounded-3xl border border-white/10 bg-white/5 p-4" onSubmit={handleConfigureCountry}>
+              <div>
+                <h3 className="font-semibold text-white">Country configuration</h3>
+                <p className="mt-1 text-sm text-yellow-400">
+                  Warning: This might take 2-3 mins as it involves retraining the model.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-2 block text-xs font-medium uppercase tracking-[0.16em] text-slate-300" htmlFor="country-iso2">
+                    ISO2
+                  </label>
+                  <input
+                    id="country-iso2"
+                    className="dashboard-input uppercase"
+                    maxLength={2}
+                    onChange={(event) => setCountryIso2(event.target.value.toUpperCase())}
+                    value={countryIso2}
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block text-xs font-medium uppercase tracking-[0.16em] text-slate-300" htmlFor="country-iso3">
+                    ISO3
+                  </label>
+                  <input
+                    id="country-iso3"
+                    className="dashboard-input uppercase"
+                    maxLength={3}
+                    onChange={(event) => setCountryIso3(event.target.value.toUpperCase())}
+                    value={countryIso3}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-xs font-medium uppercase tracking-[0.16em] text-slate-300" htmlFor="country-grid-km">
+                  Grid size (km)
+                </label>
+                <input
+                  id="country-grid-km"
+                  className="dashboard-input"
+                  min={1}
+                  max={200}
+                  onChange={(event) => setGridKm(event.target.value)}
+                  type="number"
+                  value={gridKm}
+                />
+              </div>
+
+              <button className="dashboard-button w-full" disabled={isConfiguringCountry} type="submit">
+                {isConfiguringCountry ? "Applying country..." : "Apply country config"}
+              </button>
+
+              {countryConfigError ? (
+                <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+                  {countryConfigError}
+                </div>
+              ) : null}
             </form>
 
             {error ? (
