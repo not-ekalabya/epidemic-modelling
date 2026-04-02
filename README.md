@@ -1,45 +1,205 @@
-### Epidemic Progression Modelling: CodeCure
+# 🦠 Epidemic Progression Modelling: CodeCure
 
---- TODO: @Ujan ---
+A machine learning–driven system for modeling and analyzing epidemic spread using spatiotemporal data, mobility patterns, and demographic features.
 
-### Getting Started
+---
 
-```pip install -r requirements.txt```
+## 🚀 Getting Started
 
-Start Fast-API server
+### 1. Install Dependencies
 
-```uvicorn server.server:app --host 0.0.0.0 --port 8000```
+```bash
+pip install -r requirements.txt
+```
 
-### Train model manually
+---
 
-```python preprocessing.py```
+### 2. Run the FastAPI Server
 
-```python model.py```
+```bash
+uvicorn server.server:app --host 0.0.0.0 --port 8000
+```
 
-Modify ```COUNTRY_ISO2 = "BD" ``` and ```COUNTRY_ISO3 = "BGD" ``` with ISO-2 and ISO-3 country codes at ```main.py``` to access population densities of different countries.
+Once running, the API will be available at:
 
+```
+http://127.0.0.1:8000
+```
 
+---
 
---- TODO (@Ujan): Add more detailed docs ---
+## 🧠 Model Training
 
-### Conventions
+### Step 1: Data Preprocessing
 
-Always update ```/requirements.txt``` and ```/dockerfile``` and build the app before sending PRs.
+```bash
+python preprocessing.py
+```
 
-TODO (@Ujan) : Add naming and contributions conventions for ```/helpers```
+### Step 2: Train Model
 
-**File naming conventions -**
+```bash
+python model.py
+```
 
-- In the folder ```/helpers``` all the helpers related to data downloading has the name ```data_XXX.py```
+---
 
-- In the folder ```/visual_analysis``` all the helpers related to data downloading has the name ```analysis_XXX.py```
+## 🌍 Configuring Country Data
 
-### Data Notes
+To run the model for a specific country, modify the following variables in `main.py`:
 
-- ```helpers/data_covid.py``` downloads and caches Google COVID-19 Open Data epidemiology and geography datasets.
+```python
+COUNTRY_ISO2 = "BD"   # Example: Bangladesh
+COUNTRY_ISO3 = "BGD"
+```
 
-- ```helpers/data_mobility.py``` downloads and caches Google COVID-19 Open Data mobility datasets.
+You can replace these with any valid ISO country codes to fetch:
 
-- ```helpers/data_demographics.py``` downloads and caches Google COVID-19 Open Data demographics datasets.
+* Population density
+* Mobility trends
+* Epidemiological data
 
-- Country-specific location lookups are cached under ```data/covid/location_lookup/``` so location keys are processed once and reused for faster joins.
+---
+
+## 📁 Project Structure
+
+```
+├── server/                # FastAPI backend
+├── helpers/               # Data fetching and utility scripts
+├── visual_analysis/       # Analysis and plotting utilities
+├── data/                  # Cached datasets
+├── model.py               # Core ML model
+├── preprocessing.py       # Data preparation pipeline
+├── main.py                # Entry point / configuration
+├── requirements.txt
+└── Dockerfile
+```
+
+---
+
+## 📊 Data Pipeline Overview
+
+The project integrates multiple datasets:
+
+### 1. Epidemiological Data
+
+* Source: Google COVID-19 Open Data
+* Includes: cases, deaths, recoveries
+
+### 2. Mobility Data
+
+* Tracks population movement trends
+
+### 3. Demographics Data
+
+* Includes population density and regional attributes
+
+---
+
+## 📦 Data Handling Notes
+
+* `helpers/data_covid.py`
+  → Downloads and caches epidemiology + geography data
+
+* `helpers/data_mobility.py`
+  → Downloads and caches mobility datasets
+
+* `helpers/data_demographics.py`
+  → Downloads and caches demographic datasets
+
+* Cached location mappings stored in:
+
+```
+data/covid/location_lookup/
+```
+
+This improves performance by avoiding repeated joins.
+
+---
+
+## 📈 Output & Evaluation
+
+The model generates:
+
+* Infection trend predictions
+* Temporal progression curves
+* Region-wise spread analysis
+
+You can extend evaluation using:
+
+* Accuracy vs baseline
+* ROC-AUC
+* F1-score (recommended for imbalanced data)
+
+---
+
+## 🧩 Conventions
+
+### File Naming
+
+#### `/helpers`
+
+* Data-related utilities:
+
+```
+data_<source>.py
+```
+
+Example:
+
+```
+data_covid.py
+data_mobility.py
+```
+
+#### `/visual_analysis`
+
+* Analysis scripts:
+
+```
+analysis_<purpose>.py
+```
+
+---
+
+### Code Practices
+
+* Keep functions modular and reusable
+* Use type hints where possible
+* Document non-trivial logic
+
+---
+
+## 🤝 Contribution Guidelines
+
+Before submitting a PR:
+
+1. Update dependencies:
+
+```bash
+requirements.txt
+```
+
+2. Ensure Docker build works:
+
+```bash
+docker build .
+```
+
+3. Follow naming conventions
+
+4. Add clear documentation for:
+
+   * New features
+   * Data sources
+   * Model changes
+
+---
+
+## 🔧 Future Improvements
+
+* Add experiment tracking (e.g., MLflow)
+* Improve model evaluation metrics
+* Add visualization dashboard (Streamlit / React)
+* Hyperparameter tuning pipeline
+* Multi-country comparative analysis
