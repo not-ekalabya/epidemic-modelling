@@ -1,6 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
+
+const PredictionMap = dynamic(() => import("../components/Map"), {
+  ssr: false,
+});
 
 type CellProgression = {
   grid_lat: number;
@@ -27,6 +32,12 @@ type PredictionResponse = {
 };
 
 type MetadataResponse = {
+  date_min?: string;
+  date_max?: string;
+  forecast_weeks?: number;
+  history_weeks?: number;
+  dataset_rows?: number;
+  grid_cell_count?: number;
   country_configs: Array<{
     country_iso2: string;
     country_iso3: string;
@@ -46,7 +57,8 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PredictionResponse | null>(null);
   const [metadata, setMetadata] = useState<MetadataResponse | null>(null);
-  const [showAllCells, setShowAllCells] = useState(false);
+  const [selectedCellIndex, setSelectedCellIndex] = useState<number>(0);
+  const [sortMode, setSortMode] = useState<"predicted" | "actual">("predicted");
 
   useEffect(() => {
     let active = true;
@@ -100,7 +112,8 @@ export default function Home() {
       }
 
       setResult(payload);
-      setShowAllCells(false);
+      setSelectedCellIndex(0);
+      setSortMode("predicted");
     } catch {
       setResult(null);
       setError("Could not reach the prediction server.");
@@ -109,124 +122,293 @@ export default function Home() {
     }
   }
 
+  const cells = result?.prediction.per_cell_progression ?? [];
+  const selectedCell = cells[selectedCellIndex] ?? null;
+  const forecastWeeks = result?.prediction.predicted_trajectory.length ?? metadata?.forecast_weeks ?? 0;
+  const sortedCells = useMemo(
+    () => sortCells(cells, sortMode),
+    [cells, sortMode],
+  );
+  const totalPredicted = result?.prediction.predicted_trajectory.reduce((sum, value) => sum + value, 0) ?? 0;
+  const totalActual = result?.actual?.actual_trajectory.reduce((sum, value) => sum + value, 0) ?? null;
+
   return (
-    <main className="mx-auto min-h-screen max-w-3xl px-4 py-10">
-      <h1 className="text-2xl font-semibold">COVID Prediction</h1>
-      <p className="mt-2 text-sm text-neutral-600">
-        Submit a date to request a country-level prediction from the backend.
-      </p>
+    <main className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.18),_transparent_32%),radial-gradient(circle_at_top_right,_rgba(251,191,36,0.16),_transparent_24%),linear-gradient(180deg,_#07111f_0%,_#0a1324_40%,_#0d1728_100%)] text-slate-100">
+      <div className="absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.08)_1px,transparent_1px)] bg-[size:48px_48px] opacity-30" />
+      <div className="relative mx-auto flex min-h-screen w-full max-w-[1800px] flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
+        <header className="rounded-[28px] border border-white/10 bg-white/7 px-5 py-5 shadow-[0_30px_120px_rgba(2,6,23,0.45)] backdrop-blur-xl sm:px-6">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-3xl space-y-3">
+              <div className="inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.24em] text-cyan-200">
+                Interactive prediction dashboard
+              </div>
+              <div>
+                <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl lg:text-5xl">
+                  Spatial COVID forecast, mapped cell by cell.
+                </h1>
+                <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 sm:text-base">
+                  Choose a month, run the backend model, and inspect the predicted
+                  progression on a live map with cell-level ranking and trajectory details.
+                </p>
+              </div>
+            </div>
 
-      {metadata?.country_configs?.length ? (
-        <section className="mt-6">
-          <h2 className="text-lg font-semibold">Available countries</h2>
-          <ul className="mt-2 list-disc pl-5 text-sm text-neutral-700">
-            {metadata.country_configs.map((country) => (
-              <li key={`${country.country_iso2}-${country.country_iso3}`}>
-                {country.country_iso2} / {country.country_iso3}
-                {country.grid_km ? `, ${country.grid_km} km grid` : ""}
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      <form className="mt-8 space-y-4" onSubmit={handleSubmit}>
-        <div>
-          <label className="mb-1 block text-sm font-medium" htmlFor="prediction-date">
-            Prediction date
-          </label>
-          <input
-            id="prediction-date"
-            className="w-full rounded border px-3 py-2"
-            value={predictionDate}
-            onChange={(event) => setPredictionDate(event.target.value)}
-            type="date"
-          />
-        </div>
-
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            checked={includeActual}
-            onChange={(event) => setIncludeActual(event.target.checked)}
-            type="checkbox"
-          />
-          Include actual trajectory
-        </label>
-
-        <button
-          className="rounded border bg-black px-4 py-2 text-white disabled:opacity-60"
-          disabled={isLoading}
-          type="submit"
-        >
-          {isLoading ? "Loading..." : "Predict"}
-        </button>
-      </form>
-
-      {error ? (
-        <div className="mt-8 rounded border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
-        </div>
-      ) : null}
-
-      {result?.prediction ? (
-        <section className="mt-10 space-y-6">
-          <div>
-            <h2 className="text-lg font-semibold">Summary</h2>
-            <div className="mt-3 overflow-hidden rounded border">
-              <table className="w-full border-collapse text-sm">
-                <tbody>
-                  <TableRow
-                    label="Requested month"
-                    value={formatDateValue(
-                      result.prediction.requested_reference_week ?? result.prediction.reference_week,
-                    )}
-                  />
-                  <TableRow
-                    label="Reference month"
-                    value={formatDateValue(result.prediction.reference_week)}
-                  />
-                  <TableRow
-                    label="Cells aggregated"
-                    value={result.prediction.cell_count.toString()}
-                  />
-                  <TableRow
-                    label="Predicted next confirmed"
-                    value={result.prediction.predicted_next_confirmed.toFixed(2)}
-                  />
-                </tbody>
-              </table>
+            <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[460px]">
+              <StatCard label="Grid cells" value={metadata?.grid_cell_count?.toString() ?? "61"} />
+              <StatCard label="Forecast weeks" value={forecastWeeks.toString()} />
+              <StatCard
+                label="Dataset rows"
+                value={metadata?.dataset_rows ? compactNumber(metadata.dataset_rows) : "60k+"}
+              />
             </div>
           </div>
+        </header>
 
-          <TrajectoryTable
-            title="Predicted trajectory"
-            values={result.prediction.predicted_trajectory}
-          />
+        <section className="grid flex-1 gap-6 xl:grid-cols-[420px_minmax(0,1.55fr)_390px]">
+          <aside className="space-y-6 rounded-[28px] border border-white/10 bg-slate-950/45 p-5 shadow-[0_30px_120px_rgba(2,6,23,0.35)] backdrop-blur-xl">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-white">Controls</h2>
+                <p className="mt-1 text-sm text-slate-400">Run a fresh forecast from the API.</p>
+              </div>
+              {metadata?.country_configs?.length ? (
+                <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300">
+                  {metadata.country_configs[0].country_iso2} / {metadata.country_configs[0].country_iso3}
+                </div>
+              ) : null}
+            </div>
 
-          <CellProgressionTable
-            rows={result.prediction.per_cell_progression ?? []}
-            showAll={showAllCells}
-            onToggleShowAll={() => setShowAllCells((current) => !current)}
-          />
+            <form className="space-y-4" onSubmit={handleSubmit}>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-slate-200" htmlFor="prediction-date">
+                  Prediction date
+                </label>
+                <input
+                  id="prediction-date"
+                  className="dashboard-input"
+                  value={predictionDate}
+                  onChange={(event) => setPredictionDate(event.target.value)}
+                  type="date"
+                />
+                <p className="mt-2 text-xs text-slate-400">
+                  Available window: {formatDateValue(metadata?.date_min ?? "")}
+                  {metadata?.date_max ? ` to ${formatDateValue(metadata.date_max)}` : ""}
+                </p>
+              </div>
 
-          {result.actual ? (
-            <TrajectoryTable
-              title="Actual trajectory"
-              values={result.actual.actual_trajectory}
-            />
-          ) : null}
+              <label className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200">
+                <input
+                  checked={includeActual}
+                  className="accent-cyan-400"
+                  onChange={(event) => setIncludeActual(event.target.checked)}
+                  type="checkbox"
+                />
+                Include actual trajectory
+              </label>
+
+              <button className="dashboard-button w-full" disabled={isLoading} type="submit">
+                {isLoading ? "Running prediction..." : "Predict now"}
+              </button>
+            </form>
+
+            {error ? (
+              <div className="rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+                {error}
+              </div>
+            ) : null}
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+              <InfoTile label="Model week" value={result ? formatDateValue(result.prediction.reference_week) : "Waiting"} />
+              <InfoTile label="Cells in view" value={result?.prediction.cell_count.toString() ?? "0"} />
+              <InfoTile
+                label="Predicted total"
+                value={result ? compactNumber(totalPredicted) : "0"}
+              />
+              <InfoTile
+                label="Actual total"
+                value={totalActual !== null ? compactNumber(totalActual) : "N/A"}
+              />
+            </div>
+
+            {metadata?.country_configs?.length ? (
+              <section className="rounded-3xl border border-white/10 bg-white/5 p-4">
+                <h3 className="text-sm font-semibold text-white">Configured regions</h3>
+                <div className="mt-3 space-y-2 text-sm text-slate-300">
+                  {metadata.country_configs.map((country) => (
+                    <div
+                      className="flex items-center justify-between gap-3 rounded-2xl border border-white/5 bg-slate-950/50 px-3 py-2"
+                      key={`${country.country_iso2}-${country.country_iso3}`}
+                    >
+                      <span>{country.country_iso2} / {country.country_iso3}</span>
+                      <span className="text-slate-500">{country.grid_km ? `${country.grid_km} km grid` : "grid"}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </aside>
+
+          <section className="grid gap-6 xl:grid-rows-[minmax(0,1fr)_auto]">
+            <div className="rounded-[28px] border border-white/10 bg-slate-950/45 p-4 shadow-[0_30px_120px_rgba(2,6,23,0.35)] backdrop-blur-xl sm:p-5">
+              <div className="flex flex-col gap-4 border-b border-white/10 pb-4 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Prediction map</h2>
+                  <p className="mt-1 text-sm text-slate-400">
+                    Circle size and color track predicted next-week confirmed cases. Click a cell to inspect its trajectory.
+                  </p>
+                </div>
+
+                {result?.prediction.per_cell_progression?.length ? (
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-300">
+                    <button
+                      className={sortButtonClass(sortMode === "predicted")}
+                      onClick={() => setSortMode("predicted")}
+                      type="button"
+                    >
+                      Sort by predicted
+                    </button>
+                    <button
+                      className={sortButtonClass(sortMode === "actual")}
+                      onClick={() => setSortMode("actual")}
+                      type="button"
+                    >
+                      Sort by actual
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
+                <div className="rounded-[24px] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.92),rgba(15,23,42,0.68))] p-3">
+                  <div className="relative overflow-hidden rounded-[22px] border border-white/10 bg-slate-900/70">
+                    {cells.length ? (
+                      <PredictionMap
+                        cells={cells}
+                        onSelectCell={setSelectedCellIndex}
+                        selectedCellIndex={selectedCellIndex}
+                      />
+                    ) : (
+                      <EmptyState
+                        title="Run a prediction to populate the map"
+                        description="The backend will return per-cell projections and the dashboard will draw them on the map here."
+                      />
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-3 rounded-[24px] border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-white">Top cells</h3>
+                      <p className="text-xs text-slate-400">Ranked by {sortMode}.</p>
+                    </div>
+                    <div className="rounded-full border border-white/10 bg-slate-950/60 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-slate-400">
+                      {cells.length} cells
+                    </div>
+                  </div>
+
+                  <div className="max-h-[520px] space-y-2 overflow-auto pr-1">
+                    {sortedCells.slice(0, 12).map((cell, index) => {
+                      const originalIndex = cells.findIndex(
+                        (candidate) => candidate.grid_lat === cell.grid_lat && candidate.grid_lon === cell.grid_lon,
+                      );
+                      const isSelected = originalIndex === selectedCellIndex;
+                      return (
+                        <button
+                          className={`w-full rounded-2xl border px-3 py-3 text-left transition ${isSelected ? "border-cyan-300/50 bg-cyan-400/12" : "border-white/10 bg-slate-950/40 hover:border-white/20 hover:bg-white/8"}`}
+                          key={`${cell.grid_lat}-${cell.grid_lon}-${index}`}
+                          onClick={() => setSelectedCellIndex(originalIndex)}
+                          type="button"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-medium text-white">
+                                {cell.grid_lat.toFixed(3)}, {cell.grid_lon.toFixed(3)}
+                              </div>
+                              <div className="mt-1 text-xs text-slate-400">
+                                Next {cell.predicted_next_confirmed.toFixed(2)}
+                              </div>
+                            </div>
+                            <div className="text-right text-xs text-slate-300">
+                              <div>{formatTrajectoryMini(cell.predicted_trajectory)}</div>
+                              {cell.actual_trajectory ? (
+                                <div className="mt-1 text-slate-500">A {formatTrajectoryMini(cell.actual_trajectory)}</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+              <div className="rounded-[28px] border border-white/10 bg-slate-950/45 p-5 shadow-[0_30px_120px_rgba(2,6,23,0.35)] backdrop-blur-xl">
+                <div className="flex items-end justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold text-white">Country trajectories</h2>
+                    <p className="mt-1 text-sm text-slate-400">
+                      View the aggregate forecast and actual series side by side.
+                    </p>
+                  </div>
+                </div>
+
+                {result?.prediction ? (
+                  <div className="mt-5 grid gap-4 lg:grid-cols-2">
+                    <TrajectoryCard title="Predicted trajectory" values={result.prediction.predicted_trajectory} tone="cyan" />
+                    {result.actual ? (
+                      <TrajectoryCard title="Actual trajectory" values={result.actual.actual_trajectory} tone="amber" />
+                    ) : (
+                      <EmptyCard title="Actual trajectory" description="Enable the comparison toggle to fetch actual future values." />
+                    )}
+                  </div>
+                ) : (
+                  <EmptyCard
+                    title="No prediction loaded"
+                    description="Submit the form to visualize the country forecast and the per-cell map."
+                  />
+                )}
+              </div>
+
+              <div className="rounded-[28px] border border-white/10 bg-slate-950/45 p-5 shadow-[0_30px_120px_rgba(2,6,23,0.35)] backdrop-blur-xl">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Selected cell</h2>
+                  <p className="mt-1 text-sm text-slate-400">A focused readout updates as you hover or click the map.</p>
+                </div>
+
+                {selectedCell ? (
+                  <div className="mt-5 space-y-4">
+                    <div className="rounded-3xl border border-white/10 bg-white/5 p-4">
+                      <div className="text-sm text-slate-400">Cell coordinates</div>
+                      <div className="mt-1 text-2xl font-semibold text-white">
+                        {selectedCell.grid_lat.toFixed(4)}, {selectedCell.grid_lon.toFixed(4)}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <MetricPill label="Next" value={selectedCell.predicted_next_confirmed.toFixed(2)} />
+                      <MetricPill label="Rank" value={`#${sortedCellRank(cells, selectedCell, sortMode)}`} />
+                    </div>
+
+                    <TrajectoryCard title="Predicted path" values={selectedCell.predicted_trajectory} tone="cyan" compact />
+                    {selectedCell.actual_trajectory ? (
+                      <TrajectoryCard title="Actual path" values={selectedCell.actual_trajectory} tone="amber" compact />
+                    ) : null}
+                  </div>
+                ) : (
+                  <EmptyCard
+                    title="No cell selected"
+                    description="Click any point on the map to inspect its prediction details."
+                  />
+                )}
+              </div>
+            </div>
+          </section>
         </section>
-      ) : null}
+      </div>
     </main>
-  );
-}
-
-function TableRow({ label, value }: { label: string; value: string }) {
-  return (
-    <tr className="border-t first:border-t-0">
-      <th className="w-52 bg-neutral-50 px-3 py-2 text-left font-medium">{label}</th>
-      <td className="px-3 py-2">{value}</td>
-    </tr>
   );
 }
 
@@ -238,99 +420,183 @@ function formatDateValue(value: string) {
   return parsed.toISOString().slice(0, 10);
 }
 
-function TrajectoryTable({
+function compactNumber(value: number) {
+  return new Intl.NumberFormat("en", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+function formatTrajectoryMini(values: number[]) {
+  if (!values.length) {
+    return "-";
+  }
+
+  return values
+    .slice(0, 3)
+    .map((value) => value.toFixed(0))
+    .join(" · ");
+}
+
+function sortCells(cells: CellProgression[], sortMode: "predicted" | "actual") {
+  return [...cells].sort((left, right) => {
+    const leftValue = sortMode === "actual"
+      ? left.actual_trajectory?.[0] ?? -Infinity
+      : left.predicted_next_confirmed;
+    const rightValue = sortMode === "actual"
+      ? right.actual_trajectory?.[0] ?? -Infinity
+      : right.predicted_next_confirmed;
+
+    if (rightValue === leftValue) {
+      return left.grid_lat - right.grid_lat || left.grid_lon - right.grid_lon;
+    }
+
+    return rightValue - leftValue;
+  });
+}
+
+function sortedCellRank(cells: CellProgression[], selectedCell: CellProgression, sortMode: "predicted" | "actual") {
+  const ranked = sortCells(cells, sortMode);
+  return Math.max(
+    1,
+    ranked.findIndex(
+      (cell) => cell.grid_lat === selectedCell.grid_lat && cell.grid_lon === selectedCell.grid_lon,
+    ) + 1,
+  );
+}
+
+function sortButtonClass(active: boolean) {
+  return [
+    "rounded-full border px-3 py-1.5 transition",
+    active
+      ? "border-cyan-300/40 bg-cyan-400/15 text-cyan-100"
+      : "border-white/10 bg-white/5 text-slate-300 hover:border-white/20 hover:bg-white/10",
+  ].join(" ");
+}
+
+function TrajectoryCard({
   title,
   values,
+  tone,
+  compact = false,
 }: {
   title: string;
   values: number[];
+  tone: "cyan" | "amber";
+  compact?: boolean;
 }) {
+  const maxValue = Math.max(...values, 1);
+  const minValue = Math.min(...values, 0);
+  const lineColor = tone === "cyan" ? "#67e8f9" : "#fbbf24";
+  const areaColor = tone === "cyan" ? "rgba(34,211,238,0.16)" : "rgba(251,191,36,0.14)";
+  const width = 460;
+  const height = compact ? 140 : 180;
+  const points = values.length
+    ? values.map((value, index) => {
+        const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * (width - 24) + 12;
+        const yScale = maxValue === minValue ? 0.5 : (value - minValue) / (maxValue - minValue);
+        const y = height - 18 - yScale * (height - 40);
+        return { x, y, value };
+      })
+    : [];
+
+  const path = points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+    .join(" ");
+  const areaPath = points.length
+    ? `${path} L ${points[points.length - 1].x.toFixed(2)} ${height - 12} L ${points[0].x.toFixed(2)} ${height - 12} Z`
+    : "";
+
   return (
-    <div>
-      <h2 className="text-lg font-semibold">{title}</h2>
-      <div className="mt-3 overflow-hidden rounded border">
-        <table className="w-full border-collapse text-sm">
-          <thead className="bg-neutral-50">
-            <tr>
-              <th className="px-3 py-2 text-left font-medium">Month</th>
-              <th className="px-3 py-2 text-left font-medium">Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            {values.map((value, index) => (
-              <tr className="border-t" key={`${title}-${index}`}>
-                <td className="px-3 py-2">{index + 1}</td>
-                <td className="px-3 py-2">{value.toFixed(2)}</td>
-              </tr>
+    <div className="rounded-3xl border border-white/10 bg-slate-950/55 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-white">{title}</h3>
+        <span className={`rounded-full px-2.5 py-1 text-[11px] uppercase tracking-[0.2em] ${tone === "cyan" ? "bg-cyan-400/10 text-cyan-200" : "bg-amber-400/10 text-amber-100"}`}>
+          {compact ? "Cell" : "Aggregate"}
+        </span>
+      </div>
+
+      <div className={compact ? "mt-3" : "mt-4"}>
+        {points.length ? (
+          <svg viewBox={`0 0 ${width} ${height}`} className={compact ? "h-36 w-full" : "h-44 w-full"} role="img" aria-label={title}>
+            <rect x="0" y="0" width={width} height={height} rx="18" fill="rgba(15,23,42,0.7)" />
+            <path d={areaPath} fill={areaColor} />
+            <path d={path} fill="none" stroke={lineColor} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
+            {points.map((point, index) => (
+              <g key={`${title}-${index}`}>
+                <circle cx={point.x} cy={point.y} r="4.5" fill={lineColor} />
+              </g>
             ))}
-          </tbody>
-        </table>
+            <g fill="rgba(148,163,184,0.72)" fontSize="11">
+              <text x="12" y="18">{compact ? "0" : "Month 1"}</text>
+              <text x={width - 42} y="18">{compact ? `${values.length}` : `Month ${values.length}`}</text>
+            </g>
+          </svg>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-white/10 bg-white/5 px-4 py-8 text-center text-sm text-slate-400">
+            No trajectory values available.
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-400">
+        <div className="rounded-2xl border border-white/8 bg-white/5 px-3 py-2">
+          <div className="uppercase tracking-[0.18em] text-slate-500">Start</div>
+          <div className="mt-1 text-sm text-slate-100">{values[0]?.toFixed(2) ?? "-"}</div>
+        </div>
+        <div className="rounded-2xl border border-white/8 bg-white/5 px-3 py-2">
+          <div className="uppercase tracking-[0.18em] text-slate-500">Peak</div>
+          <div className="mt-1 text-sm text-slate-100">{Math.max(...values, 0).toFixed(2)}</div>
+        </div>
       </div>
     </div>
   );
 }
 
-function CellProgressionTable({
-  rows,
-  showAll,
-  onToggleShowAll,
-}: {
-  rows: CellProgression[];
-  showAll: boolean;
-  onToggleShowAll: () => void;
-}) {
-  if (!rows.length) {
-    return null;
-  }
-
-  const maxRows = 100;
-  const visibleRows = showAll ? rows : rows.slice(0, maxRows);
-
+function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <div className="flex items-end justify-between gap-3">
-        <h2 className="text-lg font-semibold">Per-cell progression</h2>
-        {rows.length > maxRows ? (
-          <button
-            className="rounded border px-3 py-1 text-sm"
-            onClick={onToggleShowAll}
-            type="button"
-          >
-            {showAll ? "Show top 100" : `Show all ${rows.length}`}
-          </button>
-        ) : null}
-      </div>
-
-      <div className="mt-3 overflow-auto rounded border">
-        <table className="w-full border-collapse text-sm">
-          <thead className="bg-neutral-50">
-            <tr>
-              <th className="px-3 py-2 text-left font-medium">Cell (lat, lon)</th>
-              <th className="px-3 py-2 text-left font-medium">Predicted next</th>
-              <th className="px-3 py-2 text-left font-medium">Predicted trajectory</th>
-              <th className="px-3 py-2 text-left font-medium">Actual trajectory</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visibleRows.map((row, index) => (
-              <tr className="border-t" key={`${row.grid_lat}-${row.grid_lon}-${index}`}>
-                <td className="whitespace-nowrap px-3 py-2">
-                  {row.grid_lat.toFixed(4)}, {row.grid_lon.toFixed(4)}
-                </td>
-                <td className="px-3 py-2">{row.predicted_next_confirmed.toFixed(2)}</td>
-                <td className="px-3 py-2">{formatTrajectory(row.predicted_trajectory)}</td>
-                <td className="px-3 py-2">
-                  {row.actual_trajectory ? formatTrajectory(row.actual_trajectory) : "-"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+    <div className="rounded-3xl border border-white/10 bg-white/6 px-4 py-4 shadow-lg shadow-slate-950/20 backdrop-blur-sm">
+      <div className="text-xs uppercase tracking-[0.2em] text-slate-400">{label}</div>
+      <div className="mt-2 text-2xl font-semibold text-white">{value}</div>
     </div>
   );
 }
 
-function formatTrajectory(values: number[]): string {
-  return values.map((value) => value.toFixed(2)).join(" -> ");
+function InfoTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-3xl border border-white/10 bg-white/5 px-4 py-4">
+      <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">{label}</div>
+      <div className="mt-2 text-base font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function MetricPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+      <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-white">{value}</div>
+    </div>
+  );
+}
+
+function EmptyState({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="flex h-[520px] flex-col items-center justify-center px-8 text-center">
+      <div className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-4 py-2 text-xs uppercase tracking-[0.24em] text-cyan-100">
+        Map waiting for data
+      </div>
+      <h3 className="mt-5 text-2xl font-semibold text-white">{title}</h3>
+      <p className="mt-3 max-w-md text-sm leading-6 text-slate-400">{description}</p>
+    </div>
+  );
+}
+
+function EmptyCard({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="mt-5 rounded-3xl border border-dashed border-white/10 bg-white/4 p-5 text-center">
+      <h3 className="text-base font-semibold text-white">{title}</h3>
+      <p className="mt-2 text-sm leading-6 text-slate-400">{description}</p>
+    </div>
+  );
 }
