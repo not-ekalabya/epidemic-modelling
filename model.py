@@ -11,6 +11,11 @@ import pandas as pd
 from tqdm import tqdm
 
 from data_preprocessing import get_spatiotemporal_covid_dataset
+from helpers.data_demographics import (
+    ADDITIVE_DEMOGRAPHICS_COLUMNS,
+    DEMOGRAPHICS_COLUMNS,
+    MEAN_DEMOGRAPHICS_COLUMNS,
+)
 from helpers.data_mobility import MOBILITY_COLUMNS
 
 
@@ -452,6 +457,8 @@ class SpatioTemporalCovidRLModel:
             required_columns.add("population_density")
         if "mobility" in self.data_sources:
             required_columns.update(MOBILITY_COLUMNS)
+        if "demographics" in self.data_sources:
+            required_columns.update(DEMOGRAPHICS_COLUMNS)
         missing = required_columns - set(df.columns)
         if missing:
             raise ValueError(f"Missing required columns: {sorted(missing)}")
@@ -478,6 +485,14 @@ class SpatioTemporalCovidRLModel:
                         for column in MOBILITY_COLUMNS
                     }
                     if "mobility" in self.data_sources
+                    else {}
+                ),
+                **(
+                    {
+                        column: (column, "max")
+                        for column in DEMOGRAPHICS_COLUMNS
+                    }
+                    if "demographics" in self.data_sources
                     else {}
                 ),
             )
@@ -779,35 +794,75 @@ class SpatioTemporalCovidRLModel:
         cell_lat: float,
         cell_lon: float,
     ) -> np.ndarray:
-        if "population_density" not in self.data_sources:
+        features: list[np.ndarray] = []
+
+        if "population_density" in self.data_sources:
+            cell_density = neighborhood_df[
+                (neighborhood_df["grid_lat"] == cell_lat)
+                & (neighborhood_df["grid_lon"] == cell_lon)
+            ]["population_density"]
+            cell_density_value = float(cell_density.max()) if len(cell_density) else 0.0
+
+            densities = (
+                neighborhood_df[["grid_lat", "grid_lon", "population_density"]]
+                .drop_duplicates(subset=["grid_lat", "grid_lon"])
+                ["population_density"]
+                .to_numpy(dtype=float)
+            )
+
+            if len(densities) == 0:
+                features.append(np.zeros(5, dtype=float))
+            else:
+                features.append(
+                    np.array(
+                        [
+                            cell_density_value,
+                            float(densities.sum()),
+                            float(densities.mean()),
+                            float(densities.max()),
+                            float(len(densities)),
+                        ],
+                        dtype=float,
+                    )
+                )
+
+        if "demographics" in self.data_sources:
+            static_demo_df = neighborhood_df[
+                ["grid_lat", "grid_lon", *DEMOGRAPHICS_COLUMNS]
+            ].drop_duplicates(subset=["grid_lat", "grid_lon"])
+
+            cell_demo_df = static_demo_df[
+                (static_demo_df["grid_lat"] == cell_lat)
+                & (static_demo_df["grid_lon"] == cell_lon)
+            ]
+            if len(cell_demo_df) > 0:
+                cell_demo_values = (
+                    cell_demo_df.iloc[0][DEMOGRAPHICS_COLUMNS]
+                    .to_numpy(dtype=float)
+                )
+            else:
+                cell_demo_values = np.zeros(len(DEMOGRAPHICS_COLUMNS), dtype=float)
+
+            if len(static_demo_df) == 0:
+                neighborhood_demo_values = np.zeros(len(DEMOGRAPHICS_COLUMNS), dtype=float)
+            else:
+                neighborhood_demo_values = np.array(
+                    [
+                        float(static_demo_df[column].sum())
+                        if column in ADDITIVE_DEMOGRAPHICS_COLUMNS
+                        else float(static_demo_df[column].mean())
+                        for column in DEMOGRAPHICS_COLUMNS
+                    ],
+                    dtype=float,
+                )
+
+            features.append(cell_demo_values)
+            features.append(neighborhood_demo_values)
+
+        if not features:
             return np.empty(0, dtype=float)
 
-        cell_density = neighborhood_df[
-            (neighborhood_df["grid_lat"] == cell_lat)
-            & (neighborhood_df["grid_lon"] == cell_lon)
-        ]["population_density"]
-        cell_density_value = float(cell_density.max()) if len(cell_density) else 0.0
-
-        densities = (
-            neighborhood_df[["grid_lat", "grid_lon", "population_density"]]
-            .drop_duplicates(subset=["grid_lat", "grid_lon"])
-            ["population_density"]
-            .to_numpy(dtype=float)
-        )
-
-        if len(densities) == 0:
-            return np.zeros(5, dtype=float)
-
-        return np.array(
-            [
-                cell_density_value,
-                float(densities.sum()),
-                float(densities.mean()),
-                float(densities.max()),
-                float(len(densities)),
-            ],
-            dtype=float,
-        )
+        return np.concatenate(features).astype(float)
 
     def _normalize_states(self, states: np.ndarray) -> np.ndarray:
         self._check_is_fitted(allow_pre_fit_stats=True)
@@ -1047,7 +1102,7 @@ if __name__ == "__main__":
         {"country_iso2": "TH", "country_iso3": "THA", "grid_km": 20}, # Thailand
         {"country_iso2": "VN", "country_iso3": "VNM", "grid_km": 20}, # Vietnam
     ]
-    DATA_SOURCES = ["mobility"]
+    DATA_SOURCES = ["mobility", "demographics"]
     HISTORY_WEEKS = 12
     FORECAST_WEEKS = 4
     RADIUS = 1.5

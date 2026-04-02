@@ -7,6 +7,11 @@ import webbrowser
 from branca.colormap import LinearColormap
 
 from helpers.data_covid import get_covid_data, get_country_total_covid_data
+from helpers.data_demographics import (
+    ADDITIVE_DEMOGRAPHICS_COLUMNS,
+    MEAN_DEMOGRAPHICS_COLUMNS,
+    get_demographics_data,
+)
 from helpers.data_mobility import get_mobility_data, MOBILITY_COLUMNS
 from helpers.data_population_density import get_country_population_density
 
@@ -25,6 +30,11 @@ def get_spatiotemporal_covid_dataset(
     if "population_density" in selected_sources:
         print("Loading population density...")
         pop_df = get_country_population_density(country_iso3)
+
+    demographics_grid: pd.DataFrame | None = None
+    if "demographics" in selected_sources:
+        print("Loading demographics data...")
+        demographics_df = get_demographics_data(country_iso2)
 
     print("Loading covid data...")
     covid_df = get_covid_data(country_iso2)
@@ -48,6 +58,27 @@ def get_spatiotemporal_covid_dataset(
             ["grid_lat", "grid_lon"]
         ).agg(
             population_density=("population_density", "sum")
+        ).reset_index()
+
+    if "demographics" in selected_sources:
+        demographics_df = demographics_df.copy()
+        demographics_df["grid_lat"] = (
+            np.floor(demographics_df["latitude"] / grid_size) * grid_size
+        )
+        demographics_df["grid_lon"] = (
+            np.floor(demographics_df["longitude"] / grid_size) * grid_size
+        )
+        demographics_grid = demographics_df.groupby(
+            ["grid_lat", "grid_lon"]
+        ).agg(
+            **{
+                column: (column, "sum")
+                for column in ADDITIVE_DEMOGRAPHICS_COLUMNS
+            },
+            **{
+                column: (column, "mean")
+                for column in MEAN_DEMOGRAPHICS_COLUMNS
+            },
         ).reset_index()
 
 
@@ -203,6 +234,17 @@ def get_spatiotemporal_covid_dataset(
         final_df["population_density"] = final_df[
             "population_density"
         ].fillna(0)
+
+    if demographics_grid is not None:
+        final_df = final_df.merge(
+            demographics_grid,
+            on=["grid_lat", "grid_lon"],
+            how="left"
+        )
+        for column in ADDITIVE_DEMOGRAPHICS_COLUMNS:
+            final_df[column] = final_df[column].fillna(0.0)
+        for column in MEAN_DEMOGRAPHICS_COLUMNS:
+            final_df[column] = final_df[column].fillna(0.0)
 
     if mobility_grid is not None:
         final_df = final_df.merge(

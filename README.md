@@ -40,4 +40,6 @@ TODO (@Ujan) : Add naming and contributions conventions for ```/helpers```
 
 - ```helpers/data_mobility.py``` downloads and caches Google COVID-19 Open Data mobility datasets.
 
+- ```helpers/data_demographics.py``` downloads and caches Google COVID-19 Open Data demographics datasets.
+
 - Country-specific location lookups are cached under ```data/covid/location_lookup/``` so location keys are processed once and reused for faster joins.
