@@ -42,7 +42,23 @@ python preprocessing.py
 python model.py
 ```
 
----
+The model is trained using a structured spatio-temporal dataset, and a cache file is generated during preprocessing to eliminate redundant data loading and significantly improve computational efficiency in subsequent runs. This caching mechanism ensures that once the dataset has been transformed into the required grid-based temporal format, it can be reused without repeating expensive preprocessing steps such as aggregation, normalization, and feature construction.
+
+The current implementation follows a single-country training paradigm, where the model is trained independently on data corresponding to one country at a time. This allows the model to better capture region-specific transmission dynamics, demographic patterns, and mobility trends without interference from cross-country heterogeneity. Each country’s dataset is discretized into spatial grid cells (e.g., 20 km resolution), and temporal data is aggregated into weekly intervals to form consistent time-series inputs.
+
+During training, the model constructs multiple training episodes by sliding a temporal window of length k weeks over the dataset. For each episode, the model takes as input:
+
+historical infection trends within a target grid cell,
+infection dynamics from neighboring cells within a specified spatial radius, and
+auxiliary features such as mobility indicators and population density.
+
+The model is implemented as a multi-layer perceptron (MLP) with hidden layers that learn complex non-linear relationships between spatial and temporal features. Training is performed over multiple epochs using a gradient-based optimization process, where the objective is to minimize the difference between predicted and actual infection trajectories.
+
+To stabilize training and handle the highly skewed distribution of case counts, the target values are transformed into log space before optimization. Additionally, input features are normalized using mean and standard deviation computed from the training data.
+
+A key aspect of the training process is the use of a trajectory-based error metric, where the discrepancy between predicted and actual cumulative case curves is measured as the area between the two curves. This formulation encourages the model to capture not only point-wise accuracy but also the overall progression trend of the epidemic.
+
+Overall, the training pipeline is designed to efficiently learn spatio-temporal dependencies while maintaining scalability and adaptability to different regional datasets.
 
 ## 🌍 Configuring Country Data
 
@@ -70,7 +86,6 @@ You can replace these with any valid ISO country codes to fetch:
 ├── data/                  # Cached datasets
 ├── model.py               # Core ML model
 ├── preprocessing.py       # Data preparation pipeline
-├── main.py                # Entry point / configuration
 ├── requirements.txt
 └── Dockerfile
 ```
