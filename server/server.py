@@ -16,7 +16,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from helpers.data_covid import get_country_total_covid_data
 from model import SpatioTemporalCovidRLModel, load_multi_country_dataset, train_rl_covid_model
 
-COVID_DATA_SOURCES = ["mobility"]
+COVID_DATA_SOURCES = ["mobility", "demographics"]
 
 
 DEFAULT_COUNTRY_CONFIGS = [

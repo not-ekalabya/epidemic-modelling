@@ -1131,10 +1131,6 @@ def visualize_prediction_progress(
 if __name__ == "__main__":
     COUNTRY_CONFIGS = [
         {"country_iso2": "BD", "country_iso3": "BGD", "grid_km": 20}, # Bangladesh
-        {"country_iso2": "ID", "country_iso3": "IDN", "grid_km": 20}, # Indonesia
-        {"country_iso2": "PH", "country_iso3": "PHL", "grid_km": 20}, # Philippines
-        {"country_iso2": "TH", "country_iso3": "THA", "grid_km": 20}, # Thailand
-        {"country_iso2": "VN", "country_iso3": "VNM", "grid_km": 20}, # Vietnam
     ]
     DATA_SOURCES = ["mobility", "demographics"]
     HISTORY_WEEKS = 12
